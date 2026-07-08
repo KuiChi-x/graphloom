@@ -39,18 +39,18 @@ def render_past_steps(past_steps: List[Dict[str, Any]]) -> str:
         summary_prefix = (
             f" [SUMMARY of {compacted_count} prior steps]" if compacted_count > 0 else ""
         )
-        evaluation_previous_goal = str(step.get("evaluation_previous_goal") or "").strip()
-        memory = str(step.get("memory") or "").strip()
-        next_goal = str(step.get("next_goal") or "").strip()
+        last_step_review = str(step.get("last_step_review") or "").strip()
+        working_notes = str(step.get("working_notes") or "").strip()
+        next_action = str(step.get("next_action") or "").strip()
         action_results = str(step.get("action_results") or "").strip()
         status = str(step.get("status") or "completed").strip()
 
         lines.append(f"<step_{idx + 1}>{summary_prefix}")
         if status and status != "completed":
             lines.append(f"Status: {status}")
-        lines.append(f"Evaluation of Previous Step: {evaluation_previous_goal}")
-        lines.append(f"Memory: {memory}")
-        lines.append(f"Next Goal: {next_goal}{repeat_info}")
+        lines.append(f"Last Step Review: {last_step_review}")
+        lines.append(f"Notes: {working_notes}")
+        lines.append(f"Next Action: {next_action}{repeat_info}")
 
         # Compacted summary steps carry no real action_results; skip the
         # empty line so the archival block stays clean.

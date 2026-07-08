@@ -39,6 +39,8 @@ def build_agent_graph(
     checkpointer=None,
     tool_filter: Optional[Callable] = None,
     allow_direct_reply: bool = False,
+    available_skills: Optional[List[str]] = None,
+    skills_dir: Optional[str] = None,
 ):
     # Deduplicate user tools while preserving the FIRST occurrence (highest priority)
     unique_tools = []
@@ -72,7 +74,11 @@ def build_agent_graph(
     elif find_fault is not None:
         find_fault_node = find_fault
 
-    prompt_stack = create_prompt_stack(custom_system_prompt=compiled_prompt)
+    prompt_stack = create_prompt_stack(
+        custom_system_prompt=compiled_prompt,
+        available_skills=available_skills,
+        skills_dir=skills_dir,
+    )
     ai_node = create_ai_node(prompt_stack=prompt_stack, tools=compiled_tools, llm=llm, tool_filter=tool_filter)
     workflow = StateGraph(AgentState)
 

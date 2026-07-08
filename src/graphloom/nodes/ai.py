@@ -49,17 +49,17 @@ def _build_pending_step(
     think: str = "",
     content: str = "",
 ) -> Dict[str, Any]:
-    evaluation_previous_goal = ""
-    memory = ""
-    next_goal = ""
+    last_step_review = ""
+    working_notes = ""
+    next_action = ""
     tool_calls_data: List[Dict[str, Any]] = []
     action_lines: List[str] = []
 
     for tool_call in tool_calls:
         raw_args = dict(tool_call.get("args") or {})
-        evaluation_previous_goal = str(raw_args.get("evaluation_previous_goal") or evaluation_previous_goal).strip()
-        memory = str(raw_args.get("memory") or memory).strip()
-        next_goal = str(raw_args.get("next_goal") or next_goal).strip()
+        last_step_review = str(raw_args.get("last_step_review") or last_step_review).strip()
+        working_notes = str(raw_args.get("working_notes") or working_notes).strip()
+        next_action = str(raw_args.get("next_action") or next_action).strip()
         tool_name = str(tool_call.get("name") or "")
         filtered_args = _filter_thought_args(raw_args)
         tool_calls_data.append({
@@ -75,9 +75,9 @@ def _build_pending_step(
     return {
         "step_id": _planned_step_id(state, counter),
         "status": "pending_tool",
-        "evaluation_previous_goal": evaluation_previous_goal,
-        "memory": memory,
-        "next_goal": next_goal,
+        "last_step_review": last_step_review,
+        "working_notes": working_notes,
+        "next_action": next_action,
         # think(reasoning 全文)与 content(LLM 正文全文)持久化进 step,
         # 刷新后前端可从 past_steps 还原,不再依赖一次性的实时 token 流。
         "think": think,
