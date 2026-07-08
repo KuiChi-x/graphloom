@@ -4,7 +4,7 @@
 
 **一个循环，织进你所有的 agent。**
 
-一个构建在 [LangGraph](https://github.com/langchain-ai/langgraph) 之上的通用 agent 循环框架：`build_agent_graph` 把标准 ReAct 循环装配成图，llm、工具、检查点、运行时上下文全部依赖注入，transport 与业务无关。
+构建在 [LangGraph](https://github.com/langchain-ai/langgraph) 之上的通用智能体框架。一个 `build_agent_graph` 就把一个具备完整循环、短期记忆、上下文压缩、断点续跑、子 agent 编排和技能渐进加载的 ReAct agent 装配出来——LLM、工具、检查点全部依赖注入，与传输层和业务无关。
 
 ![Python](https://img.shields.io/badge/python-3.10+-3776AB)
 ![Built on](https://img.shields.io/badge/built%20on-LangGraph-1C3C3C)
@@ -17,14 +17,16 @@
 
 ## 目录
 
-- [是什么](#是什么)
-- [设计原则](#设计原则)
+- [为什么是 graphloom](#为什么是-graphloom)
+- [亮点](#亮点)
 - [安装](#安装)
 - [快速上手](#快速上手)
 - [核心模型：循环如何流转](#核心模型循环如何流转)
+- [智能体的记忆](#智能体的记忆)
+- [技能：渐进式加载](#技能渐进式加载)
+- [子 agent 编排](#子-agent-编排)
 - [`build_agent_graph` 参数](#build_agent_graph-参数)
 - [运行时上下文](#运行时上下文)
-- [内置组件](#内置组件)
 - [框架内 / 框架外](#框架内--框架外)
 - [示例：编码 agent](#示例编码-agent)
 - [项目布局](#项目布局)
@@ -32,23 +34,22 @@
 
 ---
 
-## 是什么
+## 为什么是 graphloom
 
-graphloom 把"一个 agent 反复调用 LLM、执行工具、积累历史直到收尾"这件每个 agent 都要做的事，抽成一个可复用的图。你带来 LLM、系统提示词和一组工具，graphloom 织好循环：
+搭一个能用的 agent，真正的难点从来不是"调一次 LLM"，而是那一圈**循环里的琐事**：如何跨轮记住进度、上下文撑爆窗口怎么办、任务中断了怎么续、要拆子任务并行怎么调度、复杂工作流的最佳实践怎么复用。
 
-```
-observer? → ai → tool → route → history → compaction → ai   (+ finish)
-```
+graphloom 把这些"每个正经 agent 都要重写一遍"的东西沉淀成一个可复用的循环。你只带来 LLM、系统提示词和工具——其余的循环机制它替你织好。它**不绑定**任何传输协议、任何数据库、任何前端；这些通过依赖注入接入。
 
-它**不认识** HITL、不认识你的 websocket 协议、不认识你的业务数据库。这些都是你通过 `tools=[...]` 和 `runtime_context` 传进来的东西——框架只负责循环本身。
+## 亮点
 
-## 设计原则
-
-- **循环即框架** —— 结构性节点（ai / tool / history / compaction / finish）构成循环机制，其余一切都注入。
-- **transport 无关** —— 可观测性走 LangGraph 标准 `callbacks`，框架不定义任何自有事件、不碰任何 wire 协议。
-- **工具即扩展** —— HITL、子 agent 派发、业务能力，全是你传入的工具；框架对它们一无所知。
-- **单向依赖** —— 框架只依赖 LangGraph / LangChain，绝不反向抓取宿主。零 `import` 指向你的应用。
-- **状态自带压缩** —— 上下文逼近窗口上限时，历史步骤自动折叠成一条无损归档摘要。
+- **通用 ReAct 循环** —— `observer → ai → tool → history → compaction` 一圈到底，收尾即停。一次调用装配完成。
+- **短期记忆** —— 每一步都沉淀 `last_step_review / working_notes / next_action` 三段结构化思维链，累积成可回溯的步骤流，贯穿整个会话。
+- **上下文压缩(memory compaction)** —— 估算 token 逼近窗口上限时，自动把早期步骤**无损折叠**成一条归档摘要（关键事实逐字保留：ID、URL、约束、报错、决策），长任务永不爆上下文。
+- **断点续跑** —— 注入 checkpointer 即获得持久化；用户主动暂停时在最近检查点挂起，`ainvoke(None)` 原地续跑，状态零丢失。
+- **子 agent 编排** —— 分组并行派发子任务，组间顺序、组内并发，产物清单在父子图之间滚动合并，父图检查点自动透传。
+- **技能渐进加载** —— Claude Code 式的 skill 机制：先只给 agent 一份技能清单，任务需要时才按需读入完整工作流，系统提示词保持精简。
+- **交付物系统 + 自审** —— 内置 artifact 工具做产出与收尾；可选 `find_fault` 审阅节点对交付物质检，不合格打回重做。
+- **传输无关 · 全注入** —— HITL、可观测性、持久化、LLM 供应商全部外置。框架零宿主耦合，只依赖 LangGraph / LangChain。
 
 ## 安装
 
@@ -85,30 +86,6 @@ result = asyncio.run(graph.ainvoke(state))
 print(result["final_reply"])
 ```
 
-带检查点持久化 + 运行时上下文：
-
-```python
-graph = build_agent_graph(
-    custom_system_prompt=PROMPT,
-    tools=[...],
-    llm=llm,
-    checkpointer=checkpointer,                # 任意 LangGraph checkpointer
-)
-
-result = await graph.ainvoke(
-    build_initial_agent_state(input_query=task, session_id="s1"),
-    config={
-        "configurable": {
-            "thread_id": "s1",
-            "runtime_context": {              # 框架透传给工具与子图，自身不解读
-                "artifact_base_dir": "/workspace",
-                "callbacks": [my_stream_handler],
-            },
-        },
-    },
-)
-```
-
 ## 核心模型：循环如何流转
 
 ```
@@ -119,59 +96,94 @@ result = await graph.ainvoke(
                      └──end_tag=True──→ (find_fault?) ──→ finish ──→ END
 ```
 
-- **ai** 调用 LLM，流式合并出响应，记录一个 pending step。
-- **tool** 执行 LLM 请求的工具调用；若无工具调用且 `allow_direct_reply=True`，则以纯文本回复收尾。
-- **route** 看 `end_tag`：为真则走向收尾（可选先经审阅），否则回到 history 继续。
+- **ai** 调用 LLM，流式合并响应，记录一个 pending step（含三段思维链）。
+- **tool** 执行 LLM 请求的工具调用；若无工具调用且 `allow_direct_reply=True`，以纯文本回复收尾。
+- **route** 看 `end_tag`：为真走向收尾（可选先经审阅），否则回 history 继续。
 - **history** 把工具结果折进一条完成态 step。
-- **compaction** 当估算 token 超过阈值时，把早期步骤无损折叠成一条摘要。
+- **compaction** 当估算 token 超阈值时，把早期步骤无损折叠成摘要。
 - **finish** 收束交付物，标记 `agent_status=done`。
 
-**收尾契约**：任何工具把 `end_tag=True` 写进返回即可结束循环。内置的 `deliver_artifact` 是规范做法；纯对话型 agent 用 `allow_direct_reply=True` 走直接回复。
+**收尾契约**：任何工具把 `end_tag=True` 写进返回即可结束循环。内置 `deliver_artifact` 是规范做法；纯对话型 agent 用 `allow_direct_reply=True` 走直接回复。
+
+## 智能体的记忆
+
+graphloom 的记忆不是外挂的向量库，而是**循环状态本身**：
+
+- **每步三段式思维链** —— agent 每一步都产出 `last_step_review`（复盘上一步成败）、`working_notes`（记录进度与关键事实）、`next_action`（下一步动作）。这逼着模型显式反思、显式记账，是抗跑偏、抗遗忘的核心。
+- **步骤流即记忆** —— 这些步骤累积成 `past_steps`，随 checkpointer 持久化，跨轮、跨会话都在。渲染回提示词时以 `<agent_history>` 呈现，agent 始终看得见自己走过的路。
+- **压缩而非截断** —— 上下文逼近上限时，`compaction` 节点把最早的步骤交给 LLM 折成一条"无损归档"摘要——数字、ID、URL、用户约束、报错与其解决方式逐字保留，只压缩冗余叙述。近几步始终保持原样。于是长任务能一直跑下去，而不是简单丢掉旧历史。
+
+## 技能：渐进式加载
+
+技能（skill）是一个含 `SKILL.md` 的目录，front-matter 声明 `name` 与 `description`。agent 一开始只看到技能的**名字+描述+位置**清单；真正需要时才用 `read_artifact` 读入完整工作流，及其引用的脚本/参考。这样既给了 agent 一菜单可复用的深度流程，又不让系统提示词膨胀。
+
+```python
+graph = build_agent_graph(
+    custom_system_prompt=PROMPT,
+    tools=[...],
+    llm=llm,
+    available_skills=["pdf_extraction", "sql_report"],   # 白名单
+    skills_dir="/path/to/your/skills",                   # 你的技能库，框架不写死
+)
+```
+
+技能库放哪由你决定——`skills_dir` 注入即可，框架对内容一无所知。
+
+## 子 agent 编排
+
+配置 `subagents` 后，框架自动注入一个 `dispatch_subagents` 工具，让主 agent 把下一阶段拆成分组计划：**组间按 `group_id` 升序串行、组内并行**，上游产物滚动喂给下游，父图的 checkpointer 自动透传给每个子图。
+
+```python
+from graphloom import SubAgentSpec
+
+graph = build_agent_graph(
+    custom_system_prompt=PROMPT,
+    tools=[...],
+    llm=llm,
+    subagents=[
+        SubAgentSpec(agent_name="researcher", description="调研并取证", factory=make_researcher),
+        SubAgentSpec(agent_name="writer",     description="撰写报告",   factory=make_writer),
+    ],
+)
+```
 
 ## `build_agent_graph` 参数
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `custom_system_prompt` | `str` | 必填 | agent 的系统提示词；与框架通用提示词拼接。 |
-| `tools` | `list` | 必填 | 你的 LangChain 工具。内置 artifact 工具会自动注入（重名以你的为准）。 |
+| `tools` | `list` | 必填 | 你的 LangChain 工具。内置 artifact 工具自动注入（重名以你的为准）。 |
 | `llm` | `BaseChatModel` | 必填 | 任意 LangChain 聊天模型；ai 与 compaction 节点共用。 |
-| `find_fault` | `str \| callable` | `None` | 传字符串则装配一个用该提示词做交付物自审的审阅节点；传节点则直接用。 |
+| `find_fault` | `str \| callable` | `None` | 传字符串则用该提示词装配交付物自审节点；传节点则直接用。 |
 | `custom_find_fault` | `callable` | `None` | 你自己的审阅节点，先于 `find_fault` 运行。 |
 | `observer` | `callable` | `None` | 每轮 ai 之前运行的节点（注入外部观测/引导）。 |
-| `subagents` | `list[SubAgentSpec]` | `None` | 配置后自动注入 `dispatch_subagents` 工具做多 agent 编排。 |
+| `subagents` | `list[SubAgentSpec]` | `None` | 配置后自动注入 `dispatch_subagents` 做多 agent 编排。 |
 | `checkpointer` | LangGraph saver | `None` | 状态持久化；同时透传给子图。 |
-| `tool_filter` | `callable` | `None` | `(state, config) -> 隐藏的工具名集合`，按轮动态裁剪工具。 |
+| `tool_filter` | `callable` | `None` | `(state, config) -> 隐藏工具名集合`，按轮动态裁剪工具。 |
 | `allow_direct_reply` | `bool` | `False` | 允许 LLM 不调用工具、直接以文本回复收尾。 |
+| `available_skills` | `list[str]` | `None` | 暴露给 agent 的技能白名单。 |
+| `skills_dir` | `str` | `None` | 扫描 `*/SKILL.md` 的技能库目录。 |
 
 ## 运行时上下文
 
-宿主通过 `config["configurable"]["runtime_context"]` 注入运行期依赖。框架**原样透传**给工具与子图，自身不解读其中任何键。常见键：
+宿主通过 `config["configurable"]["runtime_context"]` 注入运行期依赖。框架**原样透传**给工具与子图，自身不解读：
 
 | 键 | 用途 |
 |---|---|
-| `artifact_base_dir` | artifact 工具的工作区根目录（也可用 `GRAPHLOOM_ARTIFACT_BASE_DIR` 环境变量）。 |
+| `artifact_base_dir` | artifact 工具的工作区根目录（亦可用 `GRAPHLOOM_ARTIFACT_BASE_DIR` 环境变量）。 |
 | `callbacks` | 传给子图的 LangGraph 回调（token 流式等观测）。 |
-| `cancel_event` | `asyncio.Event`；置位后在最近检查点抛出 `GraphInterrupt` 暂停。 |
+| `cancel_event` | `asyncio.Event`；置位后在最近检查点抛 `GraphInterrupt` 暂停。 |
 | `user_id` | 会话归属标识，供工具使用。 |
-
-## 内置组件
-
-| 组件 | 角色 | 是否默认启用 |
-|---|---|---|
-| `write / read / patch / deliver_artifact` | agent 的产出与收尾原语（沙箱在工作区内） | 是，自动注入 |
-| `dispatch_subagents` | 分组并行的多 agent 编排；透传父图 checkpointer | 仅当传入 `subagents` |
-| `find_fault` | 对交付物做结构化自审，不合格打回重做 | 仅当传入 `find_fault` |
-| 上下文压缩 | token 超限时无损折叠历史 | 是，始终在循环内 |
 
 ## 框架内 / 框架外
 
 | 框架内（graphloom 负责） | 框架外（你负责） |
 |---|---|
 | 循环与结构性节点 | 工具——含 HITL、澄清、任何业务工具 |
-| `AgentState` 与 reducers | transport / wire——ws 事件码、流式哨兵 |
+| `AgentState`、三段式思维链、上下文压缩 | 传输 / wire——ws 事件码、流式哨兵 |
 | 内置 artifact 工具、可选 dispatch / find_fault | 可观测性——走 LangGraph 标准 `callbacks` |
-| 上下文压缩 | 持久化——业务库、记忆库（框架只认注入的 checkpointer） |
-| 注入接缝：llm / checkpointer / tools / runtime_context | LLM 供应商——注入任意 `BaseChatModel` |
+| 技能渐进加载机制 | 技能内容——你的 `skills_dir` |
+| 注入接缝：llm / checkpointer / tools / runtime_context | 持久化后端、LLM 供应商 |
 
 ## 示例：编码 agent
 
@@ -196,12 +208,13 @@ src/graphloom/
   nodes/                 ai / tool / history / compaction / finish / find_fault / interrupt_guard
   tools/                 artifact（4 个工具）、dispatch（子 agent 编排）
   prompt/                系统提示词、提示词栈、上下文渲染、消息装配
+  skills/                技能加载（SKILL.md 解析 + 渐进加载提示段）
   util/                  消息工具、token 计数、会话存储
 ```
 
 ## 项目状态
 
-Alpha —— 从一套生产 agent 代码中抽取而来，正在泛化循环、剥离全部宿主耦合。1.0 之前 API 可能变动。核心循环、内置工具、子 agent 派发、上下文压缩均已用真实与桩 LLM 验证。
+Alpha —— 从一套生产 agent 代码中抽取而来，正在泛化循环、剥离全部宿主耦合。1.0 之前 API 可能变动。核心循环、短期记忆、上下文压缩、子 agent 派发、技能加载均已用真实与桩 LLM 验证。
 
 ## License
 
