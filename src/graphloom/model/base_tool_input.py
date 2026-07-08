@@ -27,13 +27,13 @@ class StandardThoughtInput(BaseModel):
     """Unified chain-of-thought parameters for all agent tools."""
     model_config = {"extra": "allow"}
 
-    evaluation_previous_goal: str = Field(
+    last_step_review: str = Field(
         description="Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain."
     )
-    memory: str = Field(
-        description="1-3 sentences of specific memory of this step and overall progress. You should put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc."
+    working_notes: str = Field(
+        description="1-3 sentences of specific notes on this step and overall progress. Put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc."
     )
-    next_goal: str = Field(
+    next_action: str = Field(
         description="State the next immediate goal and action to achieve it, in one clear sentence."
     )
 

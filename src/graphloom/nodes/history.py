@@ -5,9 +5,9 @@ from graphloom.util.message_utils import get_last_ai_message
 from graphloom.model.state import AgentState
 
 THOUGHT_FIELDS: Set[str] = {
-    "evaluation_previous_goal",
-    "memory",
-    "next_goal",
+    "last_step_review",
+    "working_notes",
+    "next_action",
     "session_id",
     "runtime_context",
 }
@@ -42,16 +42,16 @@ def create_history_node():
         past_steps_existing = list(state.get("past_steps", []) or [])
         pending_step = _latest_pending_step(past_steps_existing, result_step_id)
 
-        evaluation_previous_goal = str(pending_step.get("evaluation_previous_goal") or "").strip()
-        memory = str(pending_step.get("memory") or "").strip()
-        next_goal = str(pending_step.get("next_goal") or "").strip()
+        last_step_review = str(pending_step.get("last_step_review") or "").strip()
+        working_notes = str(pending_step.get("working_notes") or "").strip()
+        next_action = str(pending_step.get("next_action") or "").strip()
         action_results = ''
         tool_calls_data: List[Dict[str, Any]] = []
         for tool_result in tool_result_history:
             tool_args = tool_result.get("tool_args") or {}
-            evaluation_previous_goal = str(tool_args.get("evaluation_previous_goal") or evaluation_previous_goal).strip()
-            memory = str(tool_args.get("memory") or memory).strip()
-            next_goal = str(tool_args.get("next_goal") or next_goal).strip()
+            last_step_review = str(tool_args.get("last_step_review") or last_step_review).strip()
+            working_notes = str(tool_args.get("working_notes") or working_notes).strip()
+            next_action = str(tool_args.get("next_action") or next_action).strip()
             tool_name = tool_result["tool_name"]
             result = tool_result["result"]
             filtered_args = _filter_thought_args(tool_args)
@@ -68,9 +68,9 @@ def create_history_node():
         step_payload = {
             "step_id": result_step_id or str(pending_step.get("step_id") or ""),
             "status": "completed",
-            "evaluation_previous_goal": evaluation_previous_goal,
-            "memory": memory,
-            "next_goal": next_goal,
+            "last_step_review": last_step_review,
+            "working_notes": working_notes,
+            "next_action": next_action,
             # 从 pending step 透传 think/content(ai_node 已写入),完成态保留以便刷新还原。
             "think": str(pending_step.get("think") or ""),
             "content": str(pending_step.get("content") or ""),

@@ -8,9 +8,9 @@ the regular past_step dict) via a structured LLM call, and asks the reducer
 to REPLACE state["past_steps"] with [summary, *recent].
 
 The compacted step reuses the StandardThoughtInput schema
-(evaluation_previous_goal / memory / next_goal). The action_results field is
+(last_step_review / memory / next_action). The action_results field is
 deliberately left empty — the summary step is not a real action, and all
-durable facts are archived into `memory`.
+durable facts are archived into `working_notes`.
 """
 import logging
 import time
@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 # Per-field share of the total char budget. Must sum to 1.0.
-# `memory` is the primary archival surface; the other two frame it.
+# `working_notes` is the primary archival surface; the other two frame it.
 _FIELD_BUDGET_SHARE = {
-    "evaluation_previous_goal": 0.08,
-    "memory": 0.85,
-    "next_goal": 0.07,
+    "last_step_review": 0.08,
+    "working_notes": 0.85,
+    "next_action": 0.07,
 }
 
 
@@ -73,23 +73,23 @@ Things you MAY compress (but still keep pointers to):
 OUTPUT SCHEMA (StandardThoughtInput)
 Produce exactly these three fields. A fourth field `action_results` exists
 in the schema but you MUST leave it as an empty string — this compacted step
-is not a real action, and flowing narrative belongs in `memory` instead.
+is not a real action, and flowing narrative belongs in `working_notes` instead.
 
-- evaluation_previous_goal
+- last_step_review
   AIM around {eval_budget} characters.
   An overall stage assessment across ALL compacted steps: what worked,
   what failed, what remains uncertain. Aggregate, do not enumerate.
 
-- memory
-  AIM around {memory_budget} characters. This is the primary archive.
+- working_notes
+  AIM around {working_notes_budget} characters. This is the primary archive.
   Use a dense bulleted list. One concrete fact per bullet. Include
   every item from the "preserved verbatim" list above that appeared in
   the input. It is better to overshoot the aim than to drop facts.
   Group bullets by topic (e.g. "APIs & keys", "URLs visited",
   "User decisions", "Discovered constraints", "Errors & resolutions").
 
-- next_goal
-  AIM around {next_goal_budget} characters.
+- next_action
+  AIM around {next_action_budget} characters.
   The immediate next goal implied by the compacted history. If the agent
   was mid-step, state exactly where to resume (which URL, which tool,
   which parameter).
@@ -124,9 +124,9 @@ def _render_old_steps_for_summarizer(old_steps: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for idx, step in enumerate(old_steps, start=1):
         lines.append(f"<step index=\"{idx}\">")
-        lines.append(f"evaluation_previous_goal: {step.get('evaluation_previous_goal', '')}")
-        lines.append(f"memory: {step.get('memory', '')}")
-        lines.append(f"next_goal: {step.get('next_goal', '')}")
+        lines.append(f"last_step_review: {step.get('last_step_review', '')}")
+        lines.append(f"working_notes: {step.get('working_notes', '')}")
+        lines.append(f"next_action: {step.get('next_action', '')}")
         ar = str(step.get("action_results", ""))
         lines.append(f"action_results: {ar}")
         lines.append("</step>")
@@ -184,9 +184,9 @@ async def _summarize_old_steps(
     )
 
     system = COMPACTION_SYSTEM_PROMPT.format(
-        eval_budget=budgets["evaluation_previous_goal"],
-        memory_budget=budgets["memory"],
-        next_goal_budget=budgets["next_goal"],
+        eval_budget=budgets["last_step_review"],
+        working_notes_budget=budgets["working_notes"],
+        next_action_budget=budgets["next_action"],
     )
     user_payload = (
         f"<compacted_step_count>{len(old_steps)}</compacted_step_count>\n"
@@ -257,9 +257,9 @@ def create_context_compaction_node(prompt_stack: PromptStack, llm: BaseChatModel
                 # Fallback: synthesize a minimal step from raw fields so we
                 # still shrink the channel instead of leaving it unbounded.
                 fallback = {
-                    "evaluation_previous_goal": "Compaction fallback: summarizer failed.",
-                    "memory": _render_old_steps_for_summarizer(old),
-                    "next_goal": old[-1].get("next_goal", "") if old else "",
+                    "last_step_review": "Compaction fallback: summarizer failed.",
+                    "working_notes": _render_old_steps_for_summarizer(old),
+                    "next_action": old[-1].get("next_action", "") if old else "",
                     "action_results": "",
                     "compacted_step_count": len(old),
                 }
