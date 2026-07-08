@@ -1,5 +1,7 @@
 <div align="center">
 
+**中文** · [English](README.en.md)
+
 # graphloom
 
 **一个循环，织进你所有的 agent。**
@@ -25,6 +27,9 @@
 - [智能体的记忆](#智能体的记忆)
 - [技能：渐进式加载](#技能渐进式加载)
 - [子 agent 编排](#子-agent-编排)
+- [观察者节点](#观察者节点)
+- [交付审阅：找茬节点](#交付审阅找茬节点)
+- [产物通信](#产物通信)
 - [`build_agent_graph` 参数](#build_agent_graph-参数)
 - [运行时上下文](#运行时上下文)
 - [框架内 / 框架外](#框架内--框架外)
@@ -48,7 +53,9 @@ graphloom 把这些"每个正经 agent 都要重写一遍"的东西沉淀成一�
 - **断点续跑** —— 注入 checkpointer 即获得持久化；用户主动暂停时在最近检查点挂起，`ainvoke(None)` 原地续跑，状态零丢失。
 - **子 agent 编排** —— 分组并行派发子任务，组间顺序、组内并发，产物清单在父子图之间滚动合并，父图检查点自动透传。
 - **技能渐进加载** —— Claude Code 式的 skill 机制：先只给 agent 一份技能清单，任务需要时才按需读入完整工作流，系统提示词保持精简。
-- **交付物系统 + 自审** —— 内置 artifact 工具做产出与收尾；可选 `find_fault` 审阅节点对交付物质检，不合格打回重做。
+- **观察者节点(observer)** —— 可选的入口节点，每轮在 ai 之前运行，把最新外部状态注入当轮上下文。它只影响**当前这一轮**，不写进步骤流、不进记忆——用来喂实时信号（环境变化、用户旁路引导），而不污染历史。
+- **交付物系统 + 三级审阅** —— 内置 artifact 工具做产出与收尾；收尾时可串联 `custom_find_fault`（你的自定义审阅）与 `find_fault`（内置质检）两道关卡，任一不合格就打回重做，通过才交付。
+- **产物通信(artifact manifest)** —— 三条产物清单以不同合并语义在 agent、子 agent 与外界之间流转，是结构化的交付与交接通道。
 - **传输无关 · 全注入** —— HITL、可观测性、持久化、LLM 供应商全部外置。框架零宿主耦合，只依赖 LangGraph / LangChain。
 
 ## 安装
@@ -146,6 +153,49 @@ graph = build_agent_graph(
     ],
 )
 ```
+
+## 观察者节点
+
+`observer` 是一个可选的自定义节点。配置后它成为图的入口，且每一轮都在 `ai` 之前运行（`compaction → observer → ai`）。它的职责是把**最新的外部状态**注入当轮——环境快照、用户在旁路发来的实时引导、外部系统的信号等。
+
+它写入的 `observer_message_parts` 字段**没有累积语义**：每轮整体覆盖，只拼进当轮发给 LLM 的消息，**不写进 `past_steps`、不进记忆**。这是刻意的——观察者反映"此刻的世界"，一旦过时就该被新观察取代，而不是沉淀成历史噪声。
+
+```python
+async def observer(state):
+    snapshot = await read_live_environment(state["session_id"])
+    return {"observer_message_parts": [HumanMessage(content=f"[实时状态]\n{snapshot}")]}
+
+graph = build_agent_graph(custom_system_prompt=PROMPT, tools=[...], llm=llm, observer=observer)
+```
+
+## 交付审阅：找茬节点
+
+agent 标记收尾（`end_tag=True`）后，交付物在真正 finish 之前可以先过审阅关卡。graphloom 支持两级、可叠加：
+
+- **`custom_find_fault`** —— 你自己的审阅节点，先运行。想接入任何外部校验（跑测试、schema 校验、业务规则）就放这里。
+- **`find_fault`** —— 内置的 LLM 自审节点。传入一段审阅提示词，它会读交付物内容、对照原始请求做结构化质检，输出是否合格 + 缺陷清单 + 返工建议。
+
+路由：`end_tag → custom_find_fault?（有则先跑）→ find_fault?（再跑）→ finish`。审阅**不合格**则清空交付清单、带着反馈**回到 history 让 agent 重做**；合格才放行到 finish。纯文本交付（无产物）被审阅节点视为放行。
+
+```python
+graph = build_agent_graph(
+    custom_system_prompt=PROMPT, tools=[...], llm=llm,
+    custom_find_fault=my_test_runner_node,          # 先跑：你的校验
+    find_fault="You are a strict reviewer. Verify every requirement is met.",  # 后跑：LLM 自审
+)
+```
+
+## 产物通信
+
+agent 的产出不是塞进聊天记录，而是走**结构化产物清单（artifact manifest）**。state 里有三条清单，各有不同的合并语义，共同构成交付与交接通道：
+
+| 清单 | 合并语义 | 含义 |
+|---|---|---|
+| `input_artifact_manifest` | 覆盖 | 外部/上游传入的参考产物 |
+| `current_delivery_manifest` | 覆盖 | 本轮 `deliver_artifact` 提交、待审阅的产物 |
+| `approved_artifact_manifest` | 合并去重 | 已通过审阅、可交付的产物；子 agent 的产物也滚动并入这里 |
+
+内置 artifact 工具（`write / read / patch / deliver`）读写这些清单，`deliver_artifact` 把 `end_tag=True` 与 `current_delivery_manifest` 一起写入触发收尾。子 agent 编排时，上游的 `approved_artifact_manifest` 会作为下游的 `input_artifact_manifest` 喂进去——产物就是 agent 之间的交接语言。
 
 ## `build_agent_graph` 参数
 
