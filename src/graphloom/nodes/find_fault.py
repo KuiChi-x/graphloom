@@ -141,9 +141,7 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
             # graph proceed to finish with end_tag preserved.
             return {}
 
-        current_time = datetime.now().isoformat()
         combined_system_prompt = (
-            f"<environment>\nCurrent time: {current_time}\n</environment>\n\n"
             f"{COMMON_FIND_FAULT_SYSTEM_PROMPT}\n\n{system_prompt}"
         )
         messages: List[BaseMessage] = [SystemMessage(content=combined_system_prompt)]
