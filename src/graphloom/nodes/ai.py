@@ -16,6 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from graphloom.model.state import AgentState
 from graphloom.nodes.history import _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
+from graphloom.events import emit_step
 from graphloom.prompt.stack import PromptStack
 from graphloom.prompt.message_builder import build_llm_messages
 
@@ -103,7 +104,10 @@ async def _astream_with_retry(llm, messages, config: RunnableConfig):
     返回 (merged_ai_message, reasoning_total):merged 含 content 全文,
     reasoning_total 是累计的 think 全文,供上层持久化进 past_steps(刷新后可还原)。
 
-    整轮包在 @retry 里,半截失败重新流式。
+    Each chunk is also published via event_emitter (if injected) as an
+    "ai_delta" event so the host can stream token/reasoning to its UI in
+    real-time — this is the primary streaming path, not a side-effect of
+    astream_events.
     """
     merged = None
     reasoning_seen = ""
@@ -111,15 +115,30 @@ async def _astream_with_retry(llm, messages, config: RunnableConfig):
     async for chunk in llm.astream(messages, config=config):
         merged = chunk if merged is None else merged + chunk
 
+        # Extract content delta (text portion only)
+        content_delta = _chunk_text(getattr(chunk, "content", ""))
+
         # reasoning 增量:ReasoningChatOpenAI 每个 chunk 的 additional_kwargs.reasoning_content
         piece = str((getattr(chunk, "additional_kwargs", {}) or {}).get("reasoning_content") or "")
+        reasoning_delta = ""
         if piece:
             if piece.startswith(reasoning_seen) and len(piece) > len(reasoning_seen):
+                reasoning_delta = piece[len(reasoning_seen):]
                 reasoning_seen = piece
             elif piece == reasoning_seen:
-                continue
+                pass
             else:
+                reasoning_delta = piece
                 reasoning_seen += piece
+
+        # Publish every chunk to the host via the observer emitter so the
+        # UI shows live token / reasoning streaming. This is the design-
+        # contract path (not the astream_events side-channel).
+        if content_delta or reasoning_delta:
+            await emit_step(config, "ai_delta", {
+                "content": content_delta,
+                "reasoning": reasoning_delta,
+            })
 
     return merged, reasoning_seen
 
@@ -163,6 +182,24 @@ def create_ai_node(
             )
             updates["past_steps"] = [pending_step]
             updates["step_counter"] = next_counter
+            # Publish a step_planned event so observers (host WS bridge) can show
+            # the step title + think before the tool chip lands. Framework stays
+            # decoupled — emit_step is a no-op when no emitter was injected.
+            await emit_step(config, "step_planned", {
+                "step_id": pending_step["step_id"],
+                "step_index": next_counter,
+                "agent_name": str(state.get("current_agent_name") or "main"),
+                "session_id": str(state.get("session_id") or "default"),
+                "last_step_review": pending_step["last_step_review"],
+                "working_notes": pending_step["working_notes"],
+                "next_action": pending_step["next_action"],
+                "think": reasoning_text,
+                "content": content_text,
+                "tool_calls": [
+                    {"tool_name": tc["tool_name"], "tool_args": tc["tool_args"]}
+                    for tc in pending_step["tool_calls"]
+                ],
+            })
         return updates
 
     return ai_node

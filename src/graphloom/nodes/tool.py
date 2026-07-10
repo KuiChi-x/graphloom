@@ -8,6 +8,7 @@ from langchain_core.runnables.config import RunnableConfig
 
 from graphloom.nodes.history import THOUGHT_FIELDS, _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
+from graphloom.events import emit_step
 from graphloom.util.message_utils import get_last_ai_message
 from graphloom.model.state import AgentState
 
@@ -200,9 +201,27 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 }
 
             invoke_args = dict(raw_args)
+            await emit_step(config, "tool_start", {
+                "step_id": current_step_id,
+                "step_index": step_number,
+                "agent_name": current_agent_name,
+                "session_id": session_id,
+                "tool_name": name,
+                "tool_args": _filter_thought_args(raw_args),
+            })
             try:
                 result = await tool.ainvoke(invoke_args)
                 result_str = _stringify_tool_result(result)
+                await emit_step(config, "tool_end", {
+                    "step_id": current_step_id,
+                    "step_index": step_number,
+                    "agent_name": current_agent_name,
+                    "session_id": session_id,
+                    "tool_name": name,
+                    "tool_args": _filter_thought_args(raw_args),
+                    "result": result_str,
+                    "has_error": _contains_error(result_str),
+                })
                 return {
                     "step": step_number,
                     "step_id": current_step_id,
@@ -215,6 +234,16 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             except Exception as exc:
                 err_msg = f"Tool {name} execution failed: {exc}"
                 logging.error(err_msg)
+                await emit_step(config, "tool_end", {
+                    "step_id": current_step_id,
+                    "step_index": step_number,
+                    "agent_name": current_agent_name,
+                    "session_id": session_id,
+                    "tool_name": name,
+                    "tool_args": _filter_thought_args(raw_args),
+                    "result": err_msg,
+                    "has_error": True,
+                })
                 return {
                     "step": step_number,
                     "step_id": current_step_id,
