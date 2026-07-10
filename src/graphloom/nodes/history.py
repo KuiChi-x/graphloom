@@ -1,6 +1,7 @@
 import time
 from typing import Any, Dict, List, Set
 
+from graphloom.events import emit_step
 from graphloom.util.message_utils import get_last_ai_message
 from graphloom.model.state import AgentState
 
@@ -29,7 +30,7 @@ def _latest_pending_step(past_steps: List[Dict[str, Any]], step_id: str = "") ->
 
 
 def create_history_node():
-    async def history_node(state: AgentState) -> Dict[str, Any]:
+    async def history_node(state: AgentState, config: Dict[str, Any] = None) -> Dict[str, Any]:
         last_ai_message = state.get("latest_ai_message") or get_last_ai_message(list(state.get("messages", []) or []))
         if not last_ai_message:
             return {}
@@ -79,6 +80,19 @@ def create_history_node():
             "timestamp": int(pending_step.get("timestamp") or int(time.time() * 1000)),
             "completed_timestamp": int(time.time() * 1000),
         }
+        # Publish step_done so observers can close out the turn (timeline end,
+        # [STEP_DONE] sentinel, persist full step). No-op without an emitter.
+        await emit_step(config or {}, "step_done", {
+            "step_id": step_payload["step_id"],
+            "agent_name": str(state.get("current_agent_name") or "main"),
+            "session_id": str(state.get("session_id") or "default"),
+            "last_step_review": last_step_review,
+            "working_notes": working_notes,
+            "next_action": next_action,
+            "think": step_payload["think"],
+            "content": step_payload["content"],
+            "tool_calls": tool_calls_data,
+        })
         return {
             "past_steps": [step_payload],
             "tool_result_history": [],
