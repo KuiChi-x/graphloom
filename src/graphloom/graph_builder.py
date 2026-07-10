@@ -105,6 +105,9 @@ def build_agent_graph(
         # consulted when a custom reviewer is wired in; empty manifests are
         # treated as a no-op by those reviewers.
         if state.get("end_tag"):
+            # Pure-text direct replies have no delivery manifest and need no
+            if not list(state.get("current_delivery_manifest", []) or []):
+                return "finish"
             if custom_find_fault:
                 return "custom_find_fault"
             if find_fault_node:
