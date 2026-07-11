@@ -78,13 +78,13 @@ pip install -e ".[dev]"        # 含 pytest / pytest-asyncio / ruff
 
 ```python
 import asyncio
-from langchain_openai import ChatOpenAI
+from langchain_litellm import ChatLiteLLM
 from graphloom import build_agent_graph, build_initial_agent_state
 
 graph = build_agent_graph(
     custom_system_prompt="You are a helpful agent.",
     tools=[...],                              # 你的工具
-    llm=ChatOpenAI(model="gpt-4o-mini"),
+    llm=ChatLiteLLM(model="gpt-4o-mini"),
     allow_direct_reply=True,                  # 允许纯文本回复直接收尾
 )
 
