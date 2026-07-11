@@ -1,10 +1,11 @@
 """Smoke test: build_agent_graph compiles and runs a minimal loop."""
 import asyncio
+from typing import cast
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessageChunk
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from langchain_litellm import ChatLiteLLM
 
 from graphloom import build_agent_graph, build_initial_agent_state
 
@@ -33,7 +34,7 @@ async def test_build_and_run_minimal():
     graph = build_agent_graph(
         custom_system_prompt="You are a test agent.",
         tools=[_dummy],
-        llm=ChatOpenAI(model="gemini-3.5-flash", base_url="http://xx"),
+        llm=cast(ChatLiteLLM, _FakeLLM()),
         allow_direct_reply=True,
     )
     result = await graph.ainvoke(

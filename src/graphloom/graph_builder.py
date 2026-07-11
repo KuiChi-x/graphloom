@@ -9,19 +9,22 @@ the loop and the structural nodes.
 """
 from typing import Any, Callable, List, Optional
 
-from langchain_core.language_models import BaseChatModel
+from langchain_litellm import ChatLiteLLM
 from langgraph.graph import END, StateGraph
 
+from graphloom.model.state import AgentState
+from graphloom.model.subagents import SubAgentSpec
 from graphloom.nodes.ai import create_ai_node
 from graphloom.nodes.compaction import create_context_compaction_node
 from graphloom.nodes.finish import create_finish_node
 from graphloom.nodes.history import create_history_node
 from graphloom.nodes.tool import create_tool_node
-from graphloom.model.state import AgentState
-from graphloom.model.subagents import SubAgentSpec
 from graphloom.prompt.stack import create_prompt_stack
 from graphloom.tools.artifact import (
-    write_artifact, read_artifact, patch_artifact, deliver_artifact,
+    deliver_artifact,
+    patch_artifact,
+    read_artifact,
+    write_artifact,
 )
 
 _BUILTIN_ARTIFACT_TOOLS = [write_artifact, read_artifact, patch_artifact, deliver_artifact]
@@ -31,7 +34,7 @@ def build_agent_graph(
     *,
     custom_system_prompt: str,
     tools: List[Any],
-    llm: BaseChatModel,
+    llm: ChatLiteLLM,
     find_fault: Optional[Any] = None,
     custom_find_fault: Optional[Callable] = None,
     observer: Optional[Callable] = None,
