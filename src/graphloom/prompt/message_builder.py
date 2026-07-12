@@ -12,11 +12,11 @@ from typing import List
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from graphloom.model.state import AgentState
-from graphloom.prompt.stack import PromptStack
 from graphloom.prompt.context_renderer import (
     build_prompt_context,
     build_user_request_str,
 )
+from graphloom.prompt.stack import PromptStack
 
 
 async def build_llm_messages(state: AgentState, prompt_stack: PromptStack) -> List[BaseMessage]:
@@ -25,10 +25,10 @@ async def build_llm_messages(state: AgentState, prompt_stack: PromptStack) -> Li
     system_message: str = await prompt_stack.build_system_messages()
     messages.append(SystemMessage(content=system_message))
 
-    current_time = datetime.now().isoformat()
+    current_hour = datetime.now().replace(minute=0, second=0, microsecond=0).isoformat()
     prompt_context = build_prompt_context(
         state,
-        current_time=current_time,
+        current_time=current_hour,
         todo_contents=state.get("todo_contents") or "",
     )
     messages.append(HumanMessage(content=prompt_context))
