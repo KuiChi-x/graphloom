@@ -1,9 +1,10 @@
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Set
 
 from graphloom.events import emit_step
-from graphloom.util.message_utils import get_last_ai_message
 from graphloom.model.state import AgentState
+from graphloom.util.message_utils import get_last_ai_message
 
 THOUGHT_FIELDS: Set[str] = {
     "last_step_review",
@@ -95,6 +96,15 @@ def create_history_node():
         })
         return {
             "past_steps": [step_payload],
+            "events": [{
+                "id": step_payload["step_id"],
+                "type": "step",
+                "created_at": datetime.fromtimestamp(
+                    step_payload["completed_timestamp"] / 1000,
+                    tz=timezone.utc,
+                ).isoformat(),
+                "step": step_payload,
+            }],
             "tool_result_history": [],
         }
 

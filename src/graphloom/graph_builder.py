@@ -18,6 +18,7 @@ from graphloom.nodes.ai import create_ai_node
 from graphloom.nodes.compaction import create_context_compaction_node
 from graphloom.nodes.finish import create_finish_node
 from graphloom.nodes.history import create_history_node
+from graphloom.nodes.start import create_start_node
 from graphloom.nodes.tool import create_tool_node
 from graphloom.prompt.stack import create_prompt_stack
 from graphloom.tools.artifact import (
@@ -85,6 +86,7 @@ def build_agent_graph(
     ai_node = create_ai_node(prompt_stack=prompt_stack, tools=compiled_tools, llm=llm, tool_filter=tool_filter)
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("start", create_start_node())
     if observer:
         workflow.add_node("observer", observer)
     workflow.add_node("ai", ai_node)
@@ -97,7 +99,8 @@ def build_agent_graph(
     workflow.add_node("compaction", create_context_compaction_node(prompt_stack, llm))
     workflow.add_node("finish", create_finish_node())
 
-    workflow.set_entry_point("observer" if observer else "ai")
+    workflow.set_entry_point("start")
+    workflow.add_edge("start", "observer" if observer else "ai")
     if observer:
         workflow.add_edge("observer", "ai")
 

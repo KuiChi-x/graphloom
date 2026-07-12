@@ -64,9 +64,15 @@ def add_tool_results(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) ->
     return combined[-_TOOL_HISTORY_MAX:]
 
 
+def append_items(left: List[Any], right: List[Any]) -> List[Any]:
+    return list(left or []) + list(right or [])
+
+
 class AgentState(TypedDict):
     current_agent_name: str
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    conversation: Annotated[Sequence[BaseMessage], add_messages]
+    events: Annotated[List[Dict[str, Any]], append_items]
     input_query: str
     attach_message_parts: Optional[List[Dict[str, Any]]]
     session_id: Optional[str]
@@ -91,6 +97,8 @@ def build_initial_agent_state(**overrides: Any) -> AgentState:
     state: AgentState = {
         "current_agent_name": "main",
         "messages": [],
+        "conversation": [],
+        "events": [],
         "input_query": "",
         "attach_message_parts": None,
         "session_id": None,
