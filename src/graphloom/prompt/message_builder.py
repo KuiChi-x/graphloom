@@ -25,6 +25,11 @@ async def build_llm_messages(state: AgentState, prompt_stack: PromptStack) -> Li
     system_message: str = await prompt_stack.build_system_messages()
     messages.append(SystemMessage(content=system_message))
 
+    conversation = list(state.get("conversation", []) or [])
+    if conversation and isinstance(conversation[-1], HumanMessage):
+        conversation = conversation[:-1]
+    messages.extend(conversation)
+
     current_hour = datetime.now().replace(minute=0, second=0, microsecond=0).isoformat()
     prompt_context = build_prompt_context(
         state,
