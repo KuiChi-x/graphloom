@@ -93,6 +93,7 @@ def create_history_node():
             "think": step_payload["think"],
             "content": step_payload["content"],
             "tool_calls": tool_calls_data,
+            "completed_timestamp": step_payload["completed_timestamp"],
         })
         return {
             "past_steps": [step_payload],
