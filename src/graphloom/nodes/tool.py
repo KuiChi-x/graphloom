@@ -5,12 +5,13 @@ from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
+from langgraph.errors import GraphBubbleUp
 
+from graphloom.events import emit_step
+from graphloom.model.state import AgentState
 from graphloom.nodes.history import THOUGHT_FIELDS, _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
-from graphloom.events import emit_step
 from graphloom.util.message_utils import get_last_ai_message
-from graphloom.model.state import AgentState
 
 _ERROR_RE = re.compile(r"Traceback \(most recent call last\)|Error:|Exception:|FAILED", re.IGNORECASE)
 
@@ -231,6 +232,8 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     "has_error": _contains_error(result_str),
                     "raw_result": result,
                 }
+            except GraphBubbleUp:
+                raise
             except Exception as exc:
                 err_msg = f"Tool {name} execution failed: {exc}"
                 logging.error(err_msg)
