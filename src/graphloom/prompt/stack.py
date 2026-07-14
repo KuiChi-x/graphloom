@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from graphloom.prompt.system_prompt import COMMON_AGENT_SYSTEM_PROMPT
 from graphloom.skills.loader import get_skills_prompt_section
@@ -14,12 +14,12 @@ class PromptStack:
         *,
         custom_system_prompt: str,
         available_skills: Optional[List[str]] = None,
-        skills_dir: Optional[str] = None,
+        skills_dirs: Optional[Sequence[str]] = None,
     ) -> None:
         self._custom_system_prompt = str(custom_system_prompt or "").strip()
         self._common_system_prompt = str(COMMON_AGENT_SYSTEM_PROMPT or "").strip()
         self._available_skills = available_skills
-        self._skills_dir = skills_dir
+        self._skills_dirs = list(skills_dirs or [])
         if not self._custom_system_prompt:
             raise ValueError("custom_system_prompt must be provided.")
 
@@ -28,7 +28,9 @@ class PromptStack:
         if self._common_system_prompt:
             system_prompt += "\n\n" + self._common_system_prompt
         if self._available_skills:
-            skills_prompt = get_skills_prompt_section(self._available_skills, self._skills_dir)
+            skills_prompt = get_skills_prompt_section(
+                self._available_skills, self._skills_dirs
+            )
             if skills_prompt:
                 system_prompt += "\n\n" + skills_prompt
         return system_prompt
@@ -38,10 +40,10 @@ def create_prompt_stack(
     *,
     custom_system_prompt: str,
     available_skills: Optional[List[str]] = None,
-    skills_dir: Optional[str] = None,
+    skills_dirs: Optional[Sequence[str]] = None,
 ) -> PromptStack:
     return PromptStack(
         custom_system_prompt=custom_system_prompt,
         available_skills=available_skills,
-        skills_dir=skills_dir,
+        skills_dirs=skills_dirs,
     )

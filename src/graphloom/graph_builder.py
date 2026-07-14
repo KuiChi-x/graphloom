@@ -7,7 +7,7 @@ Everything transport- or business-specific (HITL, subagent dispatch, artifact
 delivery over a wire) is a tool the caller supplies; the framework wires only
 the loop and the structural nodes.
 """
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Sequence
 
 from langchain_litellm import ChatLiteLLM
 from langgraph.graph import END, StateGraph
@@ -44,7 +44,7 @@ def build_agent_graph(
     tool_filter: Optional[Callable] = None,
     allow_direct_reply: bool = False,
     available_skills: Optional[List[str]] = None,
-    skills_dir: Optional[str] = None,
+    skills_dirs: Optional[Sequence[str]] = None,
 ):
     # Deduplicate user tools while preserving the FIRST occurrence (highest priority)
     unique_tools = []
@@ -81,7 +81,7 @@ def build_agent_graph(
     prompt_stack = create_prompt_stack(
         custom_system_prompt=compiled_prompt,
         available_skills=available_skills,
-        skills_dir=skills_dir,
+        skills_dirs=skills_dirs,
     )
     ai_node = create_ai_node(prompt_stack=prompt_stack, tools=compiled_tools, llm=llm, tool_filter=tool_filter)
     workflow = StateGraph(AgentState)
