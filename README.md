@@ -130,11 +130,11 @@ graph = build_agent_graph(
     tools=[...],
     llm=llm,
     available_skills=["pdf_extraction", "sql_report"],   # 白名单
-    skills_dir="/path/to/your/skills",                   # 你的技能库，框架不写死
+    skills_dirs=["/path/to/builtin-skills", "/path/to/user-skills"],                   # 你的技能库，框架不写死
 )
 ```
 
-技能库放哪由你决定——`skills_dir` 注入即可，框架对内容一无所知。
+技能库放哪由你决定——通过 `skills_dirs` 按优先级注入一个或多个目录即可；同名 Skill 由后面的目录覆盖。框架对具体技能内容一无所知。
 
 ## 子 agent 编排
 
@@ -212,7 +212,7 @@ agent 的产出不是塞进聊天记录，而是走**结构化产物清单（art
 | `tool_filter` | `callable` | `None` | `(state, config) -> 隐藏工具名集合`，按轮动态裁剪工具。 |
 | `allow_direct_reply` | `bool` | `False` | 允许 LLM 不调用工具、直接以文本回复收尾。 |
 | `available_skills` | `list[str]` | `None` | 暴露给 agent 的技能白名单。 |
-| `skills_dir` | `str` | `None` | 扫描 `*/SKILL.md` 的技能库目录。 |
+| `skills_dirs` | `Sequence[str]` | `None` | 按顺序扫描一个或多个技能库目录；后面的同名 Skill 覆盖前面的。 |
 
 ## 运行时上下文
 
@@ -232,7 +232,7 @@ agent 的产出不是塞进聊天记录，而是走**结构化产物清单（art
 | 循环与结构性节点 | 工具——含 HITL、澄清、任何业务工具 |
 | `AgentState`、三段式思维链、上下文压缩 | 传输 / wire——ws 事件码、流式哨兵 |
 | 内置 artifact 工具、可选 dispatch / find_fault | 可观测性——走 LangGraph 标准 `callbacks` |
-| 技能渐进加载机制 | 技能内容——你的 `skills_dir` |
+| 技能渐进加载机制 | 技能内容——你的 `skills_dirs` 目录列表 |
 | 注入接缝：llm / checkpointer / tools / runtime_context | 持久化后端、LLM 供应商 |
 
 ## 示例：编码 agent
