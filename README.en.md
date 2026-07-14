@@ -130,11 +130,11 @@ graph = build_agent_graph(
     tools=[...],
     llm=llm,
     available_skills=["pdf_extraction", "sql_report"],   # whitelist
-    skills_dir="/path/to/your/skills",                   # your library; not hard-coded
+    skills_dirs=["/path/to/builtin-skills", "/path/to/user-skills"],                   # your library; not hard-coded
 )
 ```
 
-Where the skill library lives is up to you — inject `skills_dir`; the framework knows nothing about the contents.
+Where skill libraries live is up to you—inject one or more roots through `skills_dirs` in priority order. A later root overrides an earlier skill with the same name; the framework knows nothing about the skill contents.
 
 ## Sub-agent orchestration
 
@@ -212,7 +212,7 @@ The builtin artifact tools (`write / read / patch / deliver`) read and write the
 | `tool_filter` | `callable` | `None` | `(state, config) -> set of hidden tool names`, to prune tools per turn. |
 | `allow_direct_reply` | `bool` | `False` | Let the LLM finish with a plain-text reply instead of a tool call. |
 | `available_skills` | `list[str]` | `None` | Whitelist of skills exposed to the agent. |
-| `skills_dir` | `str` | `None` | Directory scanned for `*/SKILL.md`. |
+| `skills_dirs` | `Sequence[str]` | `None` | Skill-library roots scanned in order; a later root overrides an earlier skill with the same name. |
 
 ## Runtime context
 
@@ -232,7 +232,7 @@ The host injects runtime dependencies via `config["configurable"]["runtime_conte
 | The loop and structural nodes | Tools — incl. HITL, clarification, any business tool |
 | `AgentState`, the three-part chain of thought, compaction | Transport / wire — ws event codes, streaming sentinels |
 | Builtin artifact tools, optional dispatch / find_fault | Observability — via LangGraph's standard `callbacks` |
-| The progressive skill-loading mechanism | Skill contents — your `skills_dir` |
+| The progressive skill-loading mechanism | Skill contents — the roots in your `skills_dirs` list |
 | Injection seams: llm / checkpointer / tools / runtime_context | Persistence backend, LLM provider |
 
 ## Example: a coding agent
