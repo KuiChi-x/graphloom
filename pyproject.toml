@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "A minimal generic agent-loop framework on top of LangGraph: build_agent_graph assembles a standard ReAct loop (ai / tool / history / compaction / finish) with dependency-injected llm, checkpointer, tools, and runtime_context."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "xzhao32" }]
+license = { text = "Apache-2.0" }
+authors = [{ name = "KuiChi-x" }]
 keywords = ["langgraph", "agent", "llm", "framework", "react", "langchain"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
