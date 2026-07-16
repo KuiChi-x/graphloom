@@ -184,7 +184,10 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
             )
         )
 
-        structured_llm = llm.with_structured_output(GenericFindFaultOutput)
+        structured_llm = llm.with_structured_output(
+            GenericFindFaultOutput,
+            method="function_calling",
+        )
 
         result = await structured_llm.ainvoke(messages)
         validation = result.model_dump()
