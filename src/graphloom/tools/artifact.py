@@ -393,7 +393,22 @@ async def deliver_artifact(artifact_paths: List[str], final_reply: str = "", **k
 
     delivery_status = session_store.get(session_id, "delivery_status", {}) or {}
 
-    delivered_paths = valid_paths
+    # Auto-promote every runtime mount registered in this session
+    auto_added_paths: List[str] = []
+    if not enforce_approved_subset:
+        seen = {os.path.abspath(p) for p in valid_paths}
+        for entry in delivery_status.values():
+            if "kind:runtime_mount" not in (entry.get("tags") or []):
+                continue
+            mount_abs = os.path.abspath(str(entry.get("path") or "").strip())
+            if not mount_abs or mount_abs in seen:
+                continue
+            if not os.path.exists(mount_abs):
+                continue
+            auto_added_paths.append(mount_abs)
+            seen.add(mount_abs)
+
+    delivered_paths = valid_paths + auto_added_paths
 
     def _metadata_for(path: str) -> Dict[str, Any]:
         entry = delivery_status.get(os.path.basename(path)) or {}
