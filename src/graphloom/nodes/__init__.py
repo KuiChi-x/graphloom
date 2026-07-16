@@ -1,0 +1,1 @@
+"""Structural graph nodes (internal)."""
