@@ -1,144 +1,193 @@
+<!-- Once you have a logo, swap the emoji below for <img src="docs/logo.svg" width="120"> -->
 <div align="center">
 
-**中文** · [English](README.en.md)
+# 🧵 graphloom
 
-# graphloom
+**Stop rewriting the agent loop. `build_agent_graph` weaves a production-grade one in a single call.**
 
-**一个循环，织进你所有的 agent。**
+Three-horizon memory · forced step-by-step reflection · a self-correcting delivery gate · sub-agent orchestration · progressive skills — all dependency-injected, on top of [LangGraph](https://github.com/langchain-ai/langgraph).
 
-构建在 [LangGraph](https://github.com/langchain-ai/langgraph) 之上的通用智能体框架。一个 `build_agent_graph` 就把一个具备完整循环、短期记忆、上下文压缩、断点续跑、子 agent 编排和技能渐进加载的 ReAct agent 装配出来——LLM、工具、检查点全部依赖注入，与传输层和业务无关。
-
-![Python](https://img.shields.io/badge/python-3.10+-3776AB)
-![Built on](https://img.shields.io/badge/built%20on-LangGraph-1C3C3C)
-![License](https://img.shields.io/badge/license-MIT-success)
+[![PyPI](https://img.shields.io/pypi/v/graphloom?color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/graphloom/)
+[![Python](https://img.shields.io/pypi/pyversions/graphloom?logo=python&logoColor=white)](https://pypi.org/project/graphloom/)
+[![License](https://img.shields.io/pypi/l/graphloom?color=success)](LICENSE)
+![Built on LangGraph](https://img.shields.io/badge/built%20on-LangGraph-1C3C3C)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
+[![GitHub stars](https://img.shields.io/github/stars/KuiChi-x/graphloom?style=social)](https://github.com/KuiChi-x/graphloom)
+
+[简体中文](README.zh-CN.md) · [Quick start](#quick-start-30-seconds) · [Why graphloom](#why-graphloom) · [The loop](#core-model-how-the-loop-flows)
 
 </div>
 
 ---
 
-## 目录
-
-- [为什么是 graphloom](#为什么是-graphloom)
-- [亮点](#亮点)
-- [安装](#安装)
-- [快速上手](#快速上手)
-- [核心模型：循环如何流转](#核心模型循环如何流转)
-- [智能体的记忆](#智能体的记忆)
-- [技能：渐进式加载](#技能渐进式加载)
-- [子 agent 编排](#子-agent-编排)
-- [观察者节点](#观察者节点)
-- [交付审阅：找茬节点](#交付审阅找茬节点)
-- [产物通信](#产物通信)
-- [`build_agent_graph` 参数](#build_agent_graph-参数)
-- [运行时上下文](#运行时上下文)
-- [框架内 / 框架外](#框架内--框架外)
-- [示例：编码 agent](#示例编码-agent)
-- [项目布局](#项目布局)
-- [项目状态](#项目状态)
-
----
-
-## 为什么是 graphloom
-
-搭一个能用的 agent，真正的难点从来不是"调一次 LLM"，而是那一圈**循环里的琐事**：如何跨轮记住进度、上下文撑爆窗口怎么办、任务中断了怎么续、要拆子任务并行怎么调度、复杂工作流的最佳实践怎么复用。
-
-graphloom 把这些"每个正经 agent 都要重写一遍"的东西沉淀成一个可复用的循环。你只带来 LLM、系统提示词和工具——其余的循环机制它替你织好。它**不绑定**任何传输协议、任何数据库、任何前端；这些通过依赖注入接入。
-
-## 亮点
-
-- **通用 ReAct 循环** —— `observer → ai → tool → history → compaction` 一圈到底，收尾即停。一次调用装配完成。
-- **短期记忆** —— 每一步都沉淀 `last_step_review / working_notes / next_action` 三段结构化思维链，累积成可回溯的步骤流，贯穿整个会话。
-- **上下文压缩(memory compaction)** —— 估算 token 逼近窗口上限时，自动把早期步骤**无损折叠**成一条归档摘要（关键事实逐字保留：ID、URL、约束、报错、决策），长任务永不爆上下文。
-- **断点续跑** —— 注入 checkpointer 即获得持久化；用户主动暂停时在最近检查点挂起，`ainvoke(None)` 原地续跑，状态零丢失。
-- **子 agent 编排** —— 分组并行派发子任务，组间顺序、组内并发，产物清单在父子图之间滚动合并，父图检查点自动透传。
-- **技能渐进加载** —— Claude Code 式的 skill 机制：先只给 agent 一份技能清单，任务需要时才按需读入完整工作流，系统提示词保持精简。
-- **观察者节点(observer)** —— 可选的入口节点，每轮在 ai 之前运行，把最新外部状态注入当轮上下文。它只影响**当前这一轮**，不写进步骤流、不进记忆——用来喂实时信号（环境变化、用户旁路引导），而不污染历史。
-- **交付物系统 + 三级审阅** —— 内置 artifact 工具做产出与收尾；收尾时可串联 `custom_find_fault`（你的自定义审阅）与 `find_fault`（内置质检）两道关卡，任一不合格就打回重做，通过才交付。
-- **产物通信(artifact manifest)** —— 三条产物清单以不同合并语义在 agent、子 agent 与外界之间流转，是结构化的交付与交接通道。
-- **传输无关 · 全注入** —— HITL、可观测性、持久化、LLM 供应商全部外置。框架零宿主耦合，只依赖 LangGraph / LangChain。
-
-## 安装
+## Quick start (30 seconds)
 
 ```bash
 pip install graphloom
 ```
 
-从源码开发：
+The model runs through [LiteLLM](https://docs.litellm.ai/docs/providers), so any provider works. Point it at your key and endpoint — either export env vars:
 
 ```bash
-pip install -e ".[dev]"        # 含 pytest / pytest-asyncio / ruff
+export OPENAI_API_KEY="sk-..."          # your key
+# export OPENAI_API_BASE="https://your-gateway/v1"   # only if you use a proxy/gateway
 ```
 
-运行时依赖：`langchain-core`、`langgraph`、`langchain-openai`、`pydantic`、`tenacity`、`tiktoken`。
-
-## 快速上手
-
-给一个 LLM、一段系统提示词、一组工具，`build_agent_graph` 就还你一张编译好的 LangGraph，`ainvoke` 即跑：
+…or pass them straight to `ChatLiteLLM(...)` in the snippet below (`api_key=...`, `api_base=...`). Then bring three things — an LLM, a system prompt, your tools — and `build_agent_graph` weaves them into a complete agent: it reasons, calls tools, remembers across turns, and knows when it's done. One `ainvoke` runs it:
 
 ```python
 import asyncio
 from langchain_litellm import ChatLiteLLM
 from graphloom import build_agent_graph, build_initial_agent_state
 
+# 1) Assemble — bring an LLM, a system prompt, and your tools
 graph = build_agent_graph(
-    custom_system_prompt="You are a helpful agent.",
-    tools=[...],                              # 你的工具
-    llm=ChatLiteLLM(model="gpt-4o-mini"),
-    allow_direct_reply=True,                  # 允许纯文本回复直接收尾
+    custom_system_prompt="You are a helpful assistant.",
+    tools=[],                                 # add your @tool functions here
+    llm=ChatLiteLLM(
+        model="gpt-4o-mini",                  # any LiteLLM model id, e.g. "claude-3-5-sonnet-20241022"
+        # api_key="sk-...",                    # or set OPENAI_API_KEY in the env
+        # api_base="https://your-gateway/v1",  # only for a proxy / self-hosted / non-OpenAI endpoint
+    ),
+    allow_direct_reply=True,                  # let a plain-text reply finish the run
 )
 
-state = build_initial_agent_state(input_query="总结这个仓库", session_id="s1")
+# 2) Run — a full ReAct loop starts turning
+state = build_initial_agent_state(input_query="Explain what a ReAct agent is.", session_id="s1")
 result = asyncio.run(graph.ainvoke(state))
+
+# 3) Read the answer — with allow_direct_reply, the agent's text lands in final_reply
 print(result["final_reply"])
 ```
 
-## 核心模型：循环如何流转
+Runnable as-is once your key is set. That single call gives you not "one LLM request" but a **whole loop**: memory across turns, automatic context compaction, resumability, sub-agent dispatch, on-demand skills — all woven in. Add tools and it starts acting, not just answering — see the [coding agent](#example-a-coding-agent-in-35-lines) below.
+
+> [!NOTE]
+> Model ids and per-provider auth follow [LiteLLM's conventions](https://docs.litellm.ai/docs/providers) — e.g. `gpt-4o-mini` reads `OPENAI_API_KEY`, `claude-3-5-sonnet-20241022` reads `ANTHROPIC_API_KEY`, and a local `ollama/llama3` needs no key at all.
+
+> [!TIP]
+> Pure-conversation agents finish with `allow_direct_reply=True`. To deliver files or structured output, use the builtin `deliver_artifact` tool — and optionally gate it behind [delivery review](#delivery-review-find-fault-nodes).
+
+## Why graphloom
+
+Calling an LLM once is easy. Keeping it on track across dozens of steps — without drifting, blowing the context window, losing state on interruption, or failing to parallelize sub-tasks — is the real work.
+
+Those **chores around the loop** get rewritten by every serious agent: remembering progress across turns, coping when context overflows the window, resuming an interrupted task, scheduling parallel sub-tasks, reusing best-practice workflows.
+
+graphloom distills them into one reusable loop. You bring the LLM, the system prompt and the tools; it weaves the rest. It is bound to **no** transport protocol, **no** database, **no** frontend; those are dependency-injected.
+
+## What makes it different
+
+Most "agent frameworks" hand you a loop and leave memory, context limits, and quality control as an exercise. graphloom's whole point is those hard parts:
+
+### 🧠 Three-horizon memory — what actually keeps long tasks coherent
+
+A bolt-on vector store is one kind of recall. What actually breaks long agent runs is the *span between right-now and an hour ago*. graphloom tiers its working memory by age, right in the loop state — the newest steps stay perfect, the oldest get summarized, and the middle degrades gracefully in between:
+
+- **Short-term — recent steps kept verbatim.** The last few steps (default 5) are held **complete and untouched**, so the agent sees its immediate trajectory with full fidelity.
+- **Mid-term — partial truncation.** As steps age past that window, their bulky bits (verbose tool dumps) are trimmed to a budget while the reasoning stays — detail fades, the thread doesn't.
+- **Long-term — summarize as you go.** When context nears the window limit, the oldest steps are folded by the LLM into one **lossless archive** — IDs, keys, URLs, decisions and error-fixes kept **verbatim**, only redundant narration compressed. It re-counts tokens and retries tighter if needed, with an emergency floor so it can never loop forever. Amnesia never happens; the run just gets denser at the back.
+
+And the whole stream is persisted through the checkpointer and replayed as `<agent_history>`, so this memory spans turns, sessions, and process restarts.
+
+### 🪞 Reflection welded to every action — the agent can't act on autopilot
+
+Every builtin tool's argument schema **requires** a three-part chain of thought before it runs — `last_step_review` (did the last action work?), `working_notes` (what I know so far), `next_action` (what's next). It's not a prompt suggestion; it's the tool's `StandardThoughtInput` base class, so the model literally **cannot call a tool without first reflecting**. That's the difference between an agent that notices it's stuck and one that repeats the same failing call ten times — and a built-in repeat-detector tags `[repeated N times]` straight back into the prompt when it starts to.
+
+### ♻️ A self-correcting delivery gate — the agent grades its own homework
+
+Completion isn't "the model said it's done." When the agent delivers, the work passes through up to two **find-fault** gates: your own validator (`custom_find_fault` — run tests, check a schema) and a builtin LLM reviewer (`find_fault`) that reads the actual artifacts against the original request. **Reject and the specific gaps get written straight back into the next prompt** (`fatal_gaps`, `recommended_rework`), sending the agent back to fix them. A quality loop, not a hope.
+
+### 🛰️ An observer channel for the live world
+
+An optional `observer` node runs before every turn and injects the **latest** external state — an environment snapshot, side-channel user guidance, a market tick. It's spliced into that turn only and **never pollutes memory**, because "the world right now" should be replaced by the next observation, not accreted as history. Most frameworks make you fake this by jamming updates into the message list.
+
+### And the rest of the loop, assembled in one call
+
+- **Sub-agent orchestration** — dispatch grouped sub-tasks (sequential across groups, parallel within a group); artifacts roll forward parent → child, and the parent's checkpointer threads through automatically.
+- **Progressive skill loading** — a Claude Code-style skill menu: the agent sees only names + descriptions up front, and reads the full workflow on demand, keeping the system prompt lean.
+- **Resumability** — inject a checkpointer; on user pause the graph suspends at the nearest checkpoint and `ainvoke(None)` resumes in place, zero state loss.
+- **Structured artifact channel** — three manifests with distinct merge semantics carry real deliverables between agent, sub-agents and the outside world — not chat-log scraping.
+- **Transport-agnostic, fully injected** — HITL, observability, persistence and the LLM provider are all externalized. Zero host coupling; depends only on LangGraph / LangChain.
+
+## Install
+
+```bash
+pip install graphloom
+```
+
+From source:
+
+```bash
+git clone https://github.com/KuiChi-x/graphloom.git
+cd graphloom
+pip install -e ".[dev]"        # includes pytest / pytest-asyncio / ruff
+```
+
+Runtime deps: `langchain-core`, `langgraph`, `langchain-litellm`, `pydantic`, `tenacity`, `tiktoken`.
+
+## Core model: how the loop flows
 
 ```
-              ┌─────────────────────── 未收尾，继续 ───────────────────────┐
-              │                                                            │
-  observer? → ai → tool ──route──→ history → compaction ────────────────→ ai
+              ┌──────────────────── not finished, continue ────────────────────┐
+              │                                                                 │
+  observer? → ai → tool ──route──→ history → compaction ─────────────────────→ ai
                      │
                      └──end_tag=True──→ (find_fault?) ──→ finish ──→ END
 ```
 
-- **ai** 调用 LLM，流式合并响应，记录一个 pending step（含三段思维链）。
-- **tool** 执行 LLM 请求的工具调用；若无工具调用且 `allow_direct_reply=True`，以纯文本回复收尾。
-- **route** 看 `end_tag`：为真走向收尾（可选先经审阅），否则回 history 继续。
-- **history** 把工具结果折进一条完成态 step。
-- **compaction** 当估算 token 超阈值时，把早期步骤无损折叠成摘要。
-- **finish** 收束交付物，标记 `agent_status=done`。
+- **ai** calls the LLM, merges the streamed response, records a pending step (with the three-part chain of thought).
+- **tool** runs the requested tool calls; with no tool call and `allow_direct_reply=True`, a plain-text reply finishes the run.
+- **route** checks `end_tag`: if true, head to completion (optionally via review), otherwise back to history.
+- **history** folds the tool results into one completed step.
+- **compaction** folds early steps into a lossless summary once the estimated tokens exceed the threshold.
+- **finish** closes out the delivery and marks `agent_status=done`.
 
-**收尾契约**：任何工具把 `end_tag=True` 写进返回即可结束循环。内置 `deliver_artifact` 是规范做法；纯对话型 agent 用 `allow_direct_reply=True` 走直接回复。
+**Completion contract**: any tool ends the loop by putting `end_tag=True` in its return. The builtin `deliver_artifact` is the canonical way; pure-conversation agents use `allow_direct_reply=True`.
 
-## 智能体的记忆
+## An agent's memory
 
-graphloom 的记忆不是外挂的向量库，而是**循环状态本身**：
+graphloom's memory isn't a bolt-on vector store — it's the **loop state itself**, tiered by age:
 
-- **每步三段式思维链** —— agent 每一步都产出 `last_step_review`（复盘上一步成败）、`working_notes`（记录进度与关键事实）、`next_action`（下一步动作）。这逼着模型显式反思、显式记账，是抗跑偏、抗遗忘的核心。
-- **步骤流即记忆** —— 这些步骤累积成 `past_steps`，随 checkpointer 持久化，跨轮、跨会话都在。渲染回提示词时以 `<agent_history>` 呈现，agent 始终看得见自己走过的路。
-- **压缩而非截断** —— 上下文逼近上限时，`compaction` 节点把最早的步骤交给 LLM 折成一条"无损归档"摘要——数字、ID、URL、用户约束、报错与其解决方式逐字保留，只压缩冗余叙述。近几步始终保持原样。于是长任务能一直跑下去，而不是简单丢掉旧历史。
+- **Short-term — recent steps, verbatim.** The last `COMPACT_KEEP_RECENT_STEPS` steps (default 5) are kept complete and untouched. Individual tool results are hard-capped (`_HARD_TRUNCATE_LIMIT`, 50 KB) so one giant payload can't blow the turn.
+- **Mid-term — partial truncation.** Once compaction runs, the kept window's bulkiest `action_results` can be trimmed to a per-field char budget (and, in the worst case, an emergency truncation) — the reasoning survives, the raw dumps shrink.
+- **Long-term — summarize as you go.** Steps older than the kept window are folded by the LLM into one lossless archive step: numbers, IDs, URLs, user constraints, and errors-plus-fixes kept **verbatim**, only redundant narration compressed. `compaction` re-estimates tokens and retries with tighter budgets until it fits.
+- **The step stream is the memory** — steps accumulate into `past_steps`, persisted with the checkpointer, present across turns and sessions. Rendered back into the prompt as `<agent_history>`, so the agent always sees the path it has walked.
 
-## 技能：渐进式加载
+### Reflection is a required schema field, not a suggestion
 
-技能（skill）是一个含 `SKILL.md` 的目录，front-matter 声明 `name` 与 `description`。agent 一开始只看到技能的**名字+描述+位置**清单；真正需要时才用 `read_artifact` 读入完整工作流，及其引用的脚本/参考。这样既给了 agent 一菜单可复用的深度流程，又不让系统提示词膨胀。
+Every builtin tool subclasses **`StandardThoughtInput`** — a Pydantic base with three required fields the LLM must fill on *every* call:
+
+```python
+from graphloom import StandardThoughtInput  # exported from the package
+from pydantic import Field
+
+class MyToolInput(StandardThoughtInput):
+    # inherits required: last_step_review / working_notes / next_action
+    query: str = Field(description="what to search for")
+```
+
+Subclass it for your own tools and the same forced chain of thought applies to them — `last_step_review` (judge the last action), `working_notes` (carry facts forward), `next_action` (commit to the next move). This is the framework's core defense against drift and forgetting; it's why the model reflects before it acts instead of after it fails. (`PlannerThoughtInput` extends it further for orchestration tools like `dispatch_subagents`.)
+
+## Skills: progressive disclosure
+
+A skill is a directory containing a `SKILL.md` whose front-matter declares a `name` and `description`. The agent initially sees only the **name + description + location** of each skill; it reads the full workflow (and any referenced scripts/resources) on demand via `read_artifact` when a task actually needs it. This gives the agent a menu of deep, reusable workflows without bloating the system prompt.
 
 ```python
 graph = build_agent_graph(
     custom_system_prompt=PROMPT,
     tools=[...],
     llm=llm,
-    available_skills=["pdf_extraction", "sql_report"],   # 白名单
-    skills_dirs=["/path/to/builtin-skills", "/path/to/user-skills"],                   # 你的技能库，框架不写死
+    available_skills=["pdf_extraction", "sql_report"],               # whitelist
+    skills_dirs=["/path/to/builtin-skills", "/path/to/user-skills"],  # your library; not hard-coded
 )
 ```
 
-技能库放哪由你决定——通过 `skills_dirs` 按优先级注入一个或多个目录即可；同名 Skill 由后面的目录覆盖。框架对具体技能内容一无所知。
+Where skill libraries live is up to you — inject one or more roots through `skills_dirs` in priority order. A later root overrides an earlier skill with the same name; the framework knows nothing about the skill contents.
 
-## 子 agent 编排
+## Sub-agent orchestration
 
-配置 `subagents` 后，框架自动注入一个 `dispatch_subagents` 工具，让主 agent 把下一阶段拆成分组计划：**组间按 `group_id` 升序串行、组内并行**，上游产物滚动喂给下游，父图的 checkpointer 自动透传给每个子图。
+With `subagents` configured, the framework injects a `dispatch_subagents` tool that lets the main agent break the next phase into a grouped plan: **groups run in ascending `group_id` order, steps within a group run in parallel**, upstream artifacts feed downstream, and the parent's checkpointer is threaded into every sub-graph.
 
 ```python
 from graphloom import SubAgentSpec
@@ -148,124 +197,163 @@ graph = build_agent_graph(
     tools=[...],
     llm=llm,
     subagents=[
-        SubAgentSpec(agent_name="researcher", description="调研并取证", factory=make_researcher),
-        SubAgentSpec(agent_name="writer",     description="撰写报告",   factory=make_writer),
+        SubAgentSpec(agent_name="researcher", description="Research and gather evidence", factory=make_researcher),
+        SubAgentSpec(agent_name="writer",     description="Write the report",            factory=make_writer),
     ],
 )
 ```
 
-## 观察者节点
+## The observer node
 
-`observer` 是一个可选的自定义节点。配置后它成为图的入口，且每一轮都在 `ai` 之前运行（`compaction → observer → ai`）。它的职责是把**最新的外部状态**注入当轮——环境快照、用户在旁路发来的实时引导、外部系统的信号等。
+`observer` is an optional custom node. When configured it becomes the graph's entry point and runs before `ai` on every turn (`compaction → observer → ai`). Its job is to inject the **latest external state** into the current turn — an environment snapshot, live side-channel guidance from the user, signals from external systems.
 
-它写入的 `observer_message_parts` 字段**没有累积语义**：每轮整体覆盖，只拼进当轮发给 LLM 的消息，**不写进 `past_steps`、不进记忆**。这是刻意的——观察者反映"此刻的世界"，一旦过时就该被新观察取代，而不是沉淀成历史噪声。
+The `observer_message_parts` field it writes has **no accumulation semantics**: it is fully overwritten each turn, spliced only into that turn's messages to the LLM, and **never written to `past_steps` or memory**. This is deliberate — an observation reflects "the world right now"; once stale it should be replaced by a fresh one, not left to accrete as historical noise.
 
 ```python
 async def observer(state):
     snapshot = await read_live_environment(state["session_id"])
-    return {"observer_message_parts": [HumanMessage(content=f"[实时状态]\n{snapshot}")]}
+    return {"observer_message_parts": [HumanMessage(content=f"[live state]\n{snapshot}")]}
 
 graph = build_agent_graph(custom_system_prompt=PROMPT, tools=[...], llm=llm, observer=observer)
 ```
 
-## 交付审阅：找茬节点
+## Delivery review: find-fault nodes
 
-agent 标记收尾（`end_tag=True`）后，交付物在真正 finish 之前可以先过审阅关卡。graphloom 支持两级、可叠加：
+Once the agent signals completion (`end_tag=True`), the delivery can pass through review gates before actually finishing. graphloom supports two stackable stages:
 
-- **`custom_find_fault`** —— 你自己的审阅节点，先运行。想接入任何外部校验（跑测试、schema 校验、业务规则）就放这里。
-- **`find_fault`** —— 内置的 LLM 自审节点。传入一段审阅提示词，它会读交付物内容、对照原始请求做结构化质检，输出是否合格 + 缺陷清单 + 返工建议。
+- **`custom_find_fault`** — your own review node, runs first. Plug in any external validation here (run tests, validate a schema, enforce business rules).
+- **`find_fault`** — the builtin LLM self-review node. Give it a review prompt; it reads the delivered artifacts, checks them structurally against the original request, and outputs pass/fail plus a list of gaps and rework suggestions.
 
-路由：`end_tag → custom_find_fault?（有则先跑）→ find_fault?（再跑）→ finish`。审阅**不合格**则清空交付清单、带着反馈**回到 history 让 agent 重做**；合格才放行到 finish。纯文本交付（无产物）被审阅节点视为放行。
+Routing: `end_tag → custom_find_fault? (runs first if set) → find_fault? (runs next) → finish`. A **failed** review clears the delivery manifest and sends the agent **back to history to redo the work** with feedback; only a pass proceeds to finish. A text-only delivery (no artifacts) is treated as a pass by the review nodes.
 
 ```python
 graph = build_agent_graph(
     custom_system_prompt=PROMPT, tools=[...], llm=llm,
-    custom_find_fault=my_test_runner_node,          # 先跑：你的校验
-    find_fault="You are a strict reviewer. Verify every requirement is met.",  # 后跑：LLM 自审
+    custom_find_fault=my_test_runner_node,          # first: your validation
+    find_fault="You are a strict reviewer. Verify every requirement is met.",  # then: LLM self-review
 )
 ```
 
-## 产物通信
+## Artifact communication
 
-agent 的产出不是塞进聊天记录，而是走**结构化产物清单（artifact manifest）**。state 里有三条清单，各有不同的合并语义，共同构成交付与交接通道：
+An agent's output isn't stuffed into the chat log — it flows through **structured artifact manifests**. State holds three, each with distinct merge semantics, together forming the delivery and hand-off channel:
 
-| 清单 | 合并语义 | 含义 |
+| Manifest | Merge semantics | Meaning |
 |---|---|---|
-| `input_artifact_manifest` | 覆盖 | 外部/上游传入的参考产物 |
-| `current_delivery_manifest` | 覆盖 | 本轮 `deliver_artifact` 提交、待审阅的产物 |
-| `approved_artifact_manifest` | 合并去重 | 已通过审阅、可交付的产物；子 agent 的产物也滚动并入这里 |
+| `input_artifact_manifest` | replace | Reference artifacts passed in from outside / upstream |
+| `current_delivery_manifest` | replace | Artifacts submitted this turn via `deliver_artifact`, awaiting review |
+| `approved_artifact_manifest` | merge + dedup | Reviewed, deliverable artifacts; sub-agent outputs roll into here too |
 
-内置 artifact 工具（`write / read / patch / deliver`）读写这些清单，`deliver_artifact` 把 `end_tag=True` 与 `current_delivery_manifest` 一起写入触发收尾。子 agent 编排时，上游的 `approved_artifact_manifest` 会作为下游的 `input_artifact_manifest` 喂进去——产物就是 agent 之间的交接语言。
+The builtin artifact tools (`write / read / patch / deliver`) read and write these manifests; `deliver_artifact` writes `end_tag=True` together with `current_delivery_manifest` to trigger completion. During sub-agent orchestration, an upstream `approved_artifact_manifest` is fed in as the downstream `input_artifact_manifest` — artifacts are the hand-off language between agents.
 
-## `build_agent_graph` 参数
+## `build_agent_graph` parameters
 
-| 参数 | 类型 | 默认 | 说明 |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `custom_system_prompt` | `str` | 必填 | agent 的系统提示词；与框架通用提示词拼接。 |
-| `tools` | `list` | 必填 | 你的 LangChain 工具。内置 artifact 工具自动注入（重名以你的为准）。 |
-| `llm` | `BaseChatModel` | 必填 | 任意 LangChain 聊天模型；ai 与 compaction 节点共用。 |
-| `find_fault` | `str \| callable` | `None` | 传字符串则用该提示词装配交付物自审节点；传节点则直接用。 |
-| `custom_find_fault` | `callable` | `None` | 你自己的审阅节点，先于 `find_fault` 运行。 |
-| `observer` | `callable` | `None` | 每轮 ai 之前运行的节点（注入外部观测/引导）。 |
-| `subagents` | `list[SubAgentSpec]` | `None` | 配置后自动注入 `dispatch_subagents` 做多 agent 编排。 |
-| `checkpointer` | LangGraph saver | `None` | 状态持久化；同时透传给子图。 |
-| `tool_filter` | `callable` | `None` | `(state, config) -> 隐藏工具名集合`，按轮动态裁剪工具。 |
-| `allow_direct_reply` | `bool` | `False` | 允许 LLM 不调用工具、直接以文本回复收尾。 |
-| `available_skills` | `list[str]` | `None` | 暴露给 agent 的技能白名单。 |
-| `skills_dirs` | `Sequence[str]` | `None` | 按顺序扫描一个或多个技能库目录；后面的同名 Skill 覆盖前面的。 |
+| `custom_system_prompt` | `str` | required | The agent's system prompt; concatenated with the framework's common prompt. |
+| `tools` | `list` | required | Your LangChain tools. Builtin artifact tools are auto-injected (yours win on name clash). |
+| `llm` | `BaseChatModel` | required | Any LangChain chat model; shared by the ai and compaction nodes. |
+| `find_fault` | `str \| callable` | `None` | A string assembles an artifact self-review node with that prompt; a node is used directly. |
+| `custom_find_fault` | `callable` | `None` | Your own review node, runs before `find_fault`. |
+| `observer` | `callable` | `None` | A node run before `ai` each turn (inject external observation / guidance). |
+| `subagents` | `list[SubAgentSpec]` | `None` | When set, injects `dispatch_subagents` for multi-agent orchestration. |
+| `checkpointer` | LangGraph saver | `None` | State persistence; also threaded into sub-graphs. |
+| `tool_filter` | `callable` | `None` | `(state, config) -> set of hidden tool names`, to prune tools per turn. |
+| `allow_direct_reply` | `bool` | `False` | Let the LLM finish with a plain-text reply instead of a tool call. |
+| `available_skills` | `list[str]` | `None` | Whitelist of skills exposed to the agent. |
+| `skills_dirs` | `Sequence[str]` | `None` | Skill-library roots scanned in order; a later root overrides an earlier skill with the same name. |
 
-## 运行时上下文
+## Runtime context
 
-宿主通过 `config["configurable"]["runtime_context"]` 注入运行期依赖。框架**原样透传**给工具与子图，自身不解读：
+The host injects runtime dependencies via `config["configurable"]["runtime_context"]`. The framework **passes it through verbatim** to tools and sub-graphs without interpreting it:
 
-| 键 | 用途 |
+| Key | Purpose |
 |---|---|
-| `artifact_base_dir` | artifact 工具的工作区根目录（亦可用 `GRAPHLOOM_ARTIFACT_BASE_DIR` 环境变量）。 |
-| `callbacks` | 传给子图的 LangGraph 回调（token 流式等观测）。 |
-| `cancel_event` | `asyncio.Event`；置位后在最近检查点抛 `GraphInterrupt` 暂停。 |
-| `user_id` | 会话归属标识，供工具使用。 |
+| `artifact_base_dir` | Workspace root for artifact tools (or the `GRAPHLOOM_ARTIFACT_BASE_DIR` env var). |
+| `callbacks` | LangGraph callbacks passed to sub-graphs (token streaming and other observability). |
+| `cancel_event` | An `asyncio.Event`; once set, raises `GraphInterrupt` at the nearest checkpoint to pause. |
+| `user_id` | Session ownership identifier, for tools to use. |
 
-## 框架内 / 框架外
+## Inside / outside the framework
 
-| 框架内（graphloom 负责） | 框架外（你负责） |
+| Inside (graphloom's job) | Outside (your job) |
 |---|---|
-| 循环与结构性节点 | 工具——含 HITL、澄清、任何业务工具 |
-| `AgentState`、三段式思维链、上下文压缩 | 传输 / wire——ws 事件码、流式哨兵 |
-| 内置 artifact 工具、可选 dispatch / find_fault | 可观测性——走 LangGraph 标准 `callbacks` |
-| 技能渐进加载机制 | 技能内容——你的 `skills_dirs` 目录列表 |
-| 注入接缝：llm / checkpointer / tools / runtime_context | 持久化后端、LLM 供应商 |
+| The loop and structural nodes | Tools — incl. HITL, clarification, any business tool |
+| `AgentState`, the three-part chain of thought, compaction | Transport / wire — ws event codes, streaming sentinels |
+| Builtin artifact tools, optional dispatch / find_fault | Observability — via LangGraph's standard `callbacks` |
+| The progressive skill-loading mechanism | Skill contents — the roots in your `skills_dirs` list |
+| Injection seams: llm / checkpointer / tools / runtime_context | Persistence backend, LLM provider |
 
-## 示例：编码 agent
+## Example: a coding agent in ~35 lines
 
-[`examples/coding_agent/`](examples/coding_agent/) 用约 60 行搭了一个 Claude Code / Codex 风格的编码 agent：`read_file`、`write_file`、`run_command` 三个工具接进 `build_agent_graph`，从 `.env` 读一个 OpenAI 兼容网关。
+Three tools (read, write, run) wired into `build_agent_graph` — that's a Claude Code / Codex-style coding agent:
 
-```bash
-pip install -e ".[dev]" python-dotenv
-cp .env.example .env        # 填入 BASE_URL / OPENAI_API_KEY / MODEL
-python -m examples.coding_agent.agent "创建 fizzbuzz.py 并运行它"
+```python
+import asyncio
+import subprocess
+from pathlib import Path
+
+from langchain_core.tools import tool
+from langchain_litellm import ChatLiteLLM
+from graphloom import build_agent_graph, build_initial_agent_state
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a file's contents."""
+    return Path(path).read_text(encoding="utf-8")
+
+
+@tool
+def write_file(path: str, content: str) -> str:
+    """Write contents to a file."""
+    Path(path).write_text(content, encoding="utf-8")
+    return f"wrote {path}"
+
+
+@tool
+def run_command(cmd: str) -> str:
+    """Run a shell command (only in a workspace you trust)."""
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return (r.stdout + r.stderr).strip()
+
+
+graph = build_agent_graph(
+    custom_system_prompt="You are a coding agent. Read, write and run code to satisfy the request.",
+    tools=[read_file, write_file, run_command],
+    llm=ChatLiteLLM(model="gpt-4o-mini"),
+    allow_direct_reply=True,
+)
+
+state = build_initial_agent_state(input_query="create fizzbuzz.py and run it", session_id="demo")
+print(asyncio.run(graph.ainvoke(state))["final_reply"])
 ```
 
-agent 在沙箱工作区里读写文件、执行命令，验证结果后直接回复。`run_command` 会执行任意 shell——只在你信任的工作区里运行。
+The agent reads/writes files, runs commands, verifies the result, then replies directly. Auth is the same as the [quick start](#quick-start-30-seconds) — env var or `api_key=`/`api_base=` on `ChatLiteLLM`. `run_command` executes arbitrary shell — **only run it against a workspace you trust**.
 
-## 项目布局
+## Project layout
 
 ```
 src/graphloom/
-  __init__.py            公开 API：build_agent_graph / AgentState / SubAgentSpec / …
-  graph_builder.py       入口
-  config.py              可调项（压缩阈值、并发上限等）
-  model/                 state、reducers、schema、子 agent 规格
+  __init__.py            public API: build_agent_graph / build_initial_agent_state / AgentState / SubAgentSpec / …
+  graph_builder.py       entry point
+  config.py              tunables (compaction thresholds, concurrency cap, …)
+  model/                 state, reducers, schemas, sub-agent specs
   nodes/                 ai / tool / history / compaction / finish / find_fault / interrupt_guard
-  tools/                 artifact（4 个工具）、dispatch（子 agent 编排）
-  prompt/                系统提示词、提示词栈、上下文渲染、消息装配
-  skills/                技能加载（SKILL.md 解析 + 渐进加载提示段）
-  util/                  消息工具、token 计数、会话存储
+  tools/                 artifact (4 tools), dispatch (sub-agent orchestration)
+  prompt/                system prompts, prompt stack, context renderer, message builder
+  skills/                skill loading (SKILL.md parsing + progressive-disclosure prompt section)
+  util/                  message utils, token counter, session store
 ```
 
-## 项目状态
+## Status
 
-Alpha —— 从一套生产 agent 代码中抽取而来，正在泛化循环、剥离全部宿主耦合。1.0 之前 API 可能变动。核心循环、短期记忆、上下文压缩、子 agent 派发、技能加载均已用真实与桩 LLM 验证。
+Alpha — extracted from a production agent codebase, generalizing the loop and stripping all host coupling. API may change before 1.0. The core loop, short-term memory, context compaction, sub-agent dispatch and skill loading are all verified against real and stubbed LLMs.
+
+## Contributing
+
+Issues and PRs welcome. Set up with `pip install -e ".[dev]"`, and run `pytest` and `ruff check` before submitting.
 
 ## License
 
-MIT
+[Apache 2.0](LICENSE)

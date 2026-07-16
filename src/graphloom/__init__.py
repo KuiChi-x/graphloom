@@ -14,10 +14,13 @@ Quick start::
 """
 from graphloom.graph_builder import build_agent_graph
 from graphloom.model.base_tool_input import PlannerThoughtInput, StandardThoughtInput
+from graphloom.model.state import AgentState, build_initial_agent_state
 from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
 
 __all__ = [
     "build_agent_graph",
+    "build_initial_agent_state",
+    "AgentState",
     "SubAgentSpec",
     "SubAgentRunContext",
     "StandardThoughtInput",
