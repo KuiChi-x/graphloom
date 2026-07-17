@@ -187,6 +187,7 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
         structured_llm = llm.with_structured_output(
             GenericFindFaultOutput,
             method="json_schema",
+            strict=False,
         )
 
         result = await structured_llm.ainvoke(messages)
