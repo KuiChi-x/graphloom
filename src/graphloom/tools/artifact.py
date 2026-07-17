@@ -66,7 +66,8 @@ def _session_base_dir(runtime_context: Dict[str, Any]) -> str:
 
 
 def _get_session_dir(session_id: str, runtime_context: Dict[str, Any]) -> str:
-    path = os.path.join(_session_base_dir(runtime_context), session_id)
+    explicit = str(runtime_context.get("artifact_dir") or "").strip()
+    path = explicit or os.path.join(_session_base_dir(runtime_context), session_id)
     os.makedirs(path, exist_ok=True)
     return path
 
