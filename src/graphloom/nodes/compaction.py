@@ -180,7 +180,7 @@ async def _summarize_old_steps(
     # bind BEFORE with_structured_output so the provider sees max_tokens.
     structured_llm = (
         llm.bind(max_tokens=_max_output_tokens())
-        .with_structured_output(StandardThoughtInput, method="function_calling",)
+        .with_structured_output(StandardThoughtInput, method="json_schema",)
     )
 
     system = COMPACTION_SYSTEM_PROMPT.format(
