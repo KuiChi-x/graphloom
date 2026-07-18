@@ -91,28 +91,3 @@ class AgentState(TypedDict):
     agent_status: Optional[str]
 
     end_tag: bool
-
-
-def build_initial_agent_state(**overrides: Any) -> AgentState:
-    state: AgentState = {
-        "current_agent_name": "main",
-        "messages": [],
-        "conversation": [],
-        "events": [],
-        "input_query": "",
-        "attach_message_parts": None,
-        "session_id": None,
-        "latest_ai_message": None,
-        "past_steps": [],
-        "step_counter": 0,
-        "tool_result_history": [],
-        "observer_message_parts": None,
-        "input_artifact_manifest": [],
-        "current_delivery_manifest": [],
-        "approved_artifact_manifest": [],
-        "final_reply": "",
-        "agent_status": "running",
-        "end_tag": False,
-    }
-    state.update(overrides)
-    return state

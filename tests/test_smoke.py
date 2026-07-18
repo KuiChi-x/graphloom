@@ -44,7 +44,7 @@ async def test_build_and_run_minimal():
         allow_direct_reply=True,
     )
     result = await graph.ainvoke(
-        {"input_query": "hi", "session_id": "s1"}
+        {"input_query": "hi"}
     )
     assert result["agent_status"] == "done"
     assert result["end_tag"] is True
@@ -61,22 +61,18 @@ async def test_follow_up_request_uses_checkpoint_conversation_history():
         allow_direct_reply=True,
         checkpointer=checkpointer,
     )
-    config = {"configurable": {"thread_id": "multi-turn", "checkpoint_ns": ""}}
-
     await graph.ainvoke(
-        {"input_query": "Only use GET requests", "session_id": "s1"},
-        config=config,
+        {"input_query": "Only use GET requests"},
     )
     await graph.ainvoke(
-        {"input_query": "Continue with authentication", "session_id": "s1"},
-        config=config,
+        {"input_query": "Continue with authentication"},
     )
 
     second_prompt = "\n".join(str(message.content) for message in llm.calls[-1])
     assert "Only use GET requests" in second_prompt
     assert "Continue with authentication" in second_prompt
 
-    snapshot = await graph.aget_state(config)
+    snapshot = await graph.aget_state({"configurable": {"thread_id": "default", "checkpoint_ns": ""}})
     conversation = list(snapshot.values["conversation"])
     assert [message.type for message in conversation] == [
         "human",

@@ -38,7 +38,7 @@ export OPENAI_API_KEY="sk-..."          # your key
 ```python
 import asyncio
 from langchain_litellm import ChatLiteLLM
-from graphloom import build_agent_graph, build_initial_agent_state
+from graphloom import build_agent_graph
 
 # 1) Assemble — bring an LLM, a system prompt, and your tools
 graph = build_agent_graph(
@@ -52,13 +52,16 @@ graph = build_agent_graph(
     allow_direct_reply=True,                  # let a plain-text reply finish the run
 )
 
-# 2) Run — a full ReAct loop starts turning
-state = build_initial_agent_state(input_query="Explain what a ReAct agent is.", session_id="s1")
-result = asyncio.run(graph.ainvoke(state))
+# 2) Run
+result = asyncio.run(graph.ainvoke(
+    {"input_query": "Explain what a ReAct agent is."},
+))
 
 # 3) Read the answer — with allow_direct_reply, the agent's text lands in final_reply
 print(result["final_reply"])
 ```
+
+When no LangGraph config is supplied, Graphloom uses the fixed checkpoint thread `default`. `session_id` is optional business context for tools and observers that need per-session resources such as artifact directories or browser state; it does not select the checkpoint thread. A host that serves multiple independent checkpoint sessions must bind a graph with LangGraph's native `graph.with_config({"configurable": {"thread_id": session_id}})` before invoking.
 
 Runnable as-is once your key is set. That single call gives you not "one LLM request" but a **whole loop**: memory across turns, automatic context compaction, resumability, sub-agent dispatch, on-demand skills — all woven in. Add tools and it starts acting, not just answering — see the [coding agent](#example-a-coding-agent-in-35-lines) below.
 
@@ -295,7 +298,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
-from graphloom import build_agent_graph, build_initial_agent_state
+from graphloom import build_agent_graph
 
 
 @tool
@@ -325,8 +328,11 @@ graph = build_agent_graph(
     allow_direct_reply=True,
 )
 
-state = build_initial_agent_state(input_query="create fizzbuzz.py and run it", session_id="demo")
-print(asyncio.run(graph.ainvoke(state))["final_reply"])
+session_id = "demo"
+session_graph = graph.with_config({"configurable": {"thread_id": session_id}})
+print(asyncio.run(session_graph.ainvoke(
+    {"input_query": "create fizzbuzz.py and run it"},
+))["final_reply"])
 ```
 
 The agent reads/writes files, runs commands, verifies the result, then replies directly. Auth is the same as the [quick start](#quick-start-30-seconds) — env var or `api_key=`/`api_base=` on `ChatLiteLLM`. `run_command` executes arbitrary shell — **only run it against a workspace you trust**.
@@ -335,7 +341,7 @@ The agent reads/writes files, runs commands, verifies the result, then replies d
 
 ```
 src/graphloom/
-  __init__.py            public API: build_agent_graph / build_initial_agent_state / AgentState / SubAgentSpec / …
+  __init__.py            public API: build_agent_graph / AgentState / SubAgentSpec / …
   graph_builder.py       entry point
   config.py              tunables (compaction thresholds, concurrency cap, …)
   model/                 state, reducers, schemas, sub-agent specs

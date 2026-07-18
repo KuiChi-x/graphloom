@@ -38,7 +38,7 @@ export OPENAI_API_KEY="sk-..."          # 你的 key
 ```python
 import asyncio
 from langchain_litellm import ChatLiteLLM
-from graphloom import build_agent_graph, build_initial_agent_state
+from graphloom import build_agent_graph
 
 # 1) 装配 —— 带上 LLM、系统提示词、你的工具
 graph = build_agent_graph(
@@ -52,13 +52,16 @@ graph = build_agent_graph(
     allow_direct_reply=True,                  # 允许纯文本回复直接收尾
 )
 
-# 2) 运行 —— 一个 ReAct 循环就此转起来
-state = build_initial_agent_state(input_query="解释一下什么是 ReAct agent", session_id="s1")
-result = asyncio.run(graph.ainvoke(state))
+# 2) 运行
+result = asyncio.run(graph.ainvoke(
+    {"input_query": "解释一下什么是 ReAct agent"},
+))
 
 # 3) 拿结果 —— 开了 allow_direct_reply，agent 的文本回复就落在 final_reply
 print(result["final_reply"])
 ```
+
+不传 LangGraph config 时，Graphloom 使用固定的 checkpoint 线程 `default`。`session_id` 是可选的业务上下文，供需要按会话隔离产物目录、浏览器状态等资源的工具和 observer 使用；它本身不会选择 checkpoint 线程。宿主如果需要多个独立的 checkpoint 会话，必须在调用前使用 LangGraph 原生的 `graph.with_config({"configurable": {"thread_id": session_id}})` 绑定。
 
 配好 key 后原样即可跑。就这一个调用，你拿到的不是"一次 LLM 请求"，而是一个**完整的循环**：跨轮记忆、上下文自动压缩、断点续跑、子 agent 派发、技能按需加载——全都织好了。加上工具，它就不只是回答、而是开始行动——见下方的[编码 agent 示例](#示例约-35-行搭一个编码-agent)。
 
@@ -295,7 +298,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
-from graphloom import build_agent_graph, build_initial_agent_state
+from graphloom import build_agent_graph
 
 
 @tool
@@ -325,8 +328,11 @@ graph = build_agent_graph(
     allow_direct_reply=True,
 )
 
-state = build_initial_agent_state(input_query="创建 fizzbuzz.py 并运行它", session_id="demo")
-print(asyncio.run(graph.ainvoke(state))["final_reply"])
+session_id = "demo"
+session_graph = graph.with_config({"configurable": {"thread_id": session_id}})
+print(asyncio.run(session_graph.ainvoke(
+    {"input_query": "创建 fizzbuzz.py 并运行它"},
+))["final_reply"])
 ```
 
 agent 会在工作区里读写文件、执行命令、验证结果，然后直接回复。鉴权方式和[快速上手](#快速上手30-秒)一样——环境变量，或在 `ChatLiteLLM` 上传 `api_key=`/`api_base=`。`run_command` 执行任意 shell——**只在你信任的工作区里运行**。
@@ -335,7 +341,7 @@ agent 会在工作区里读写文件、执行命令、验证结果，然后直�
 
 ```
 src/graphloom/
-  __init__.py            公开 API：build_agent_graph / build_initial_agent_state / AgentState / SubAgentSpec / …
+  __init__.py            公开 API：build_agent_graph / AgentState / SubAgentSpec / …
   graph_builder.py       入口
   config.py              可调项（压缩阈值、并发上限等）
   model/                 state、reducers、schema、子 agent 规格

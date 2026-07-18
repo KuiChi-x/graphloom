@@ -5,31 +5,13 @@ from graphloom.model.state import AgentState
 from graphloom.util.session_store import session_store
 
 
-def _compress_past_steps(past_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    compressed = []
-    for index, step in enumerate(past_steps):
-        if index == 0:
-            compressed.append(dict(step))
-            continue
-        last = compressed[-1]
-        current_action_results = str(step.get("action_results", "")).strip()
-
-        last_action_results = str(last.get("action_results", "")).strip()
-        if current_action_results == last_action_results:
-            last["repeatCount"] = last.get("repeatCount", 1) + 1
-        else:
-            compressed.append(dict(step))
-
-    return compressed
-
-
-def render_past_steps(past_steps: List[Dict[str, Any]]) -> str:
+def render_past_steps(past_steps: List[Dict[str, Any]]) -> List[str]:
     if not past_steps:
-        return "<agent_history>\n    New task, no operation history yet.\n</agent_history>"
+        return ["<agent_history>\n    New task, no operation history yet.\n</agent_history>"]
 
-    compressed = _compress_past_steps(past_steps)
-    lines = ["<agent_history>"]
-    for idx, step in enumerate(compressed):
+    blocks = ["<agent_history>"]
+    for idx, step in enumerate(past_steps):
+        step_lines: List[str] = []
         repeat_count = step.get("repeatCount", 1)
         repeat_info = (
             f" [WARNING: This action has been repeated {repeat_count} times consecutively]"
@@ -45,22 +27,23 @@ def render_past_steps(past_steps: List[Dict[str, Any]]) -> str:
         action_results = str(step.get("action_results") or "").strip()
         status = str(step.get("status") or "completed").strip()
 
-        lines.append(f"<step_{idx + 1}>{summary_prefix}")
+        step_lines.append(f"<step_{idx + 1}>{summary_prefix}")
         if status and status != "completed":
-            lines.append(f"Status: {status}")
-        lines.append(f"Last Step Review: {last_step_review}")
-        lines.append(f"Notes: {working_notes}")
-        lines.append(f"Next Action: {next_action}{repeat_info}")
+            step_lines.append(f"Status: {status}")
+        step_lines.append(f"Last Step Review: {last_step_review}")
+        step_lines.append(f"Notes: {working_notes}")
+        step_lines.append(f"Next Action: {next_action}{repeat_info}")
 
         # Compacted summary steps carry no real action_results; skip the
         # empty line so the archival block stays clean.
         if compacted_count <= 0:
             if status and status != "completed" and not action_results:
                 action_results = "Tool execution did not finish yet; this step may have been interrupted."
-            lines.append(f"Action Results: {action_results}")
-        lines.append(f"</step_{idx + 1}>")
-    lines.append("</agent_history>")
-    return "\n".join(lines)
+            step_lines.append(f"Action Results: {action_results}")
+        step_lines.append(f"</step_{idx + 1}>")
+        blocks.append("\n".join(step_lines))
+    blocks.append("</agent_history>")
+    return blocks
 
 
 def _json_block(tag: str, value: Any) -> str:
@@ -115,7 +98,6 @@ def build_user_request_str(state: AgentState) -> str:
 def build_prompt_context(state: AgentState, current_time: str = "", todo_contents: str = "") -> str:
     session_id = str(state.get("session_id") or "default")
     sections = [
-        render_past_steps(list(state.get("past_steps", []) or [])),
         f"<environment>\nCurrent time: {current_time}\n</environment>" if current_time else "",
         render_todo_contents(todo_contents),
         render_delivery_status(session_id),

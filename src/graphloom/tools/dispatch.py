@@ -22,9 +22,8 @@ from pydantic import BaseModel, Field
 
 from graphloom.config import SUBAGENT_MAX_CONCURRENCY
 from graphloom.model.artifact_manifest import merge_artifact_manifest
-from graphloom.model.state import build_initial_agent_state
-from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
 from graphloom.model.base_tool_input import PlannerThoughtInput
+from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
 
 
 def render_available_subagents(subagents: List[SubAgentSpec]) -> str:
@@ -153,12 +152,10 @@ def _resolve_subagent(subagents: List[SubAgentSpec], step: SubAgentTask) -> SubA
 
 def _build_sub_state(
     *,
-    session_id: str,
     step: SubAgentTask,
     spec: SubAgentSpec,
     input_artifact_manifest: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    child_session_id = _build_child_session_id(session_id, spec, step)
     step_request = _render_step_request(step)
     blocks = [
         f"<planned_step_request>\n{step_request}\n</planned_step_request>",
@@ -169,13 +166,12 @@ def _build_sub_state(
     ]
 
     bootstrap_message = HumanMessage(content="\n\n".join(blocks))
-    return build_initial_agent_state(
-        messages=[bootstrap_message],
-        input_query=step_request,
-        session_id=child_session_id,
-        current_agent_name=spec.agent_name,
-        input_artifact_manifest=input_artifact_manifest,
-    )
+    return {
+        "messages": [bootstrap_message],
+        "input_query": step_request,
+        "current_agent_name": spec.agent_name,
+        "input_artifact_manifest": input_artifact_manifest,
+    }
 
 
 def _extract_final_reply(result: Any) -> str:
@@ -304,7 +300,6 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
                 try:
                     result = await agent.ainvoke(
                         _build_sub_state(
-                            session_id=session_id,
                             step=step,
                             spec=spec,
                             input_artifact_manifest=_filter_manifest(rolling_manifest, list(step.consumed_artifact_paths or [])),

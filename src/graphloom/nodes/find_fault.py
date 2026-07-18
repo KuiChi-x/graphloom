@@ -1,16 +1,15 @@
 import json
 import logging
 import os
-from datetime import datetime
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graphloom.model.state import AgentState
+from graphloom.prompt.context_renderer import _json_block, build_user_request_str, render_past_steps
 from graphloom.prompt.find_fault_system_prompt import COMMON_FIND_FAULT_SYSTEM_PROMPT
-from graphloom.prompt.context_renderer import build_user_request_str, _json_block, render_past_steps
 from graphloom.util.session_store import session_store
 
 
@@ -74,7 +73,7 @@ def _read_artifacts(manifest: List[Dict[str, Any]]) -> str:
             )
             if summary:
                 stub += f"summary: {summary}\n"
-            stub += f"</artifact_stub>"
+            stub += "</artifact_stub>"
             chunks.append(f"[Artifact] {path}\n{stub}")
             continue
 
@@ -115,10 +114,7 @@ def build_find_fault_context_str(state: AgentState) -> str | None:
     input_artifact_manifest = list(state.get("input_artifact_manifest", []) or [])
     input_text = _read_artifacts(input_artifact_manifest)
 
-    past_steps_str = render_past_steps(list(state.get("past_steps", []) or []))
-
     sections = [
-        past_steps_str,
         _json_block("input_artifact_manifest", input_artifact_manifest),
     ]
 
@@ -145,6 +141,15 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
             f"{COMMON_FIND_FAULT_SYSTEM_PROMPT}\n\n{system_prompt}"
         )
         messages: List[BaseMessage] = [SystemMessage(content=combined_system_prompt)]
+
+        history_blocks = render_past_steps(list(state.get("past_steps", []) or []))
+        if len(history_blocks) > 1:
+            messages.append(HumanMessage(content=[
+                *({"type": "text", "text": block} for block in history_blocks[:-1]),
+            ]))
+            messages.append(HumanMessage(content="</agent_history>"))
+        else:
+            messages.append(HumanMessage(content=history_blocks[0]))
 
         # 2. Context (SystemMessage)
         prompt_context = build_find_fault_context_str(state)

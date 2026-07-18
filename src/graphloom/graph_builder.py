@@ -29,6 +29,7 @@ from graphloom.tools.artifact import (
 )
 
 _BUILTIN_ARTIFACT_TOOLS = [write_artifact, read_artifact, patch_artifact, deliver_artifact]
+_DEFAULT_THREAD_ID = "default"
 
 
 def build_agent_graph(
@@ -155,4 +156,6 @@ def build_agent_graph(
     workflow.add_edge("compaction", "observer" if observer else "ai")
     workflow.add_edge("finish", END)
 
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=checkpointer).with_config(
+        {"configurable": {"thread_id": _DEFAULT_THREAD_ID}}
+    )
