@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphloom"
-version = "0.1.7"
+version = "0.1.8"
 description = "A minimal generic agent-loop framework on top of LangGraph: build_agent_graph assembles a standard ReAct loop (ai / tool / history / compaction / finish) with dependency-injected llm, checkpointer, tools, and runtime_context."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,20 +22,20 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "langchain-core>=0.3",
-    "langgraph>=0.2",
-    "langchain-litellm>=0.7,<0.8",
-    "litellm>=1.83.14,<1.92",
-    "pydantic>=2",
-    "tenacity>=8",
-    "tiktoken>=0.7",
+    "langchain-core",
+    "langgraph",
+    "langchain-litellm",
+    "litellm",
+    "pydantic",
+    "tenacity",
+    "tiktoken",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7",
-    "pytest-asyncio>=0.21",
-    "ruff>=0.6",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
 ]
 
 [tool.setuptools.packages.find]
