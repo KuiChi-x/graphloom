@@ -13,9 +13,9 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from graphloom.model.state import AgentState
 from graphloom.prompt.context_renderer import (
+    build_past_steps_message,
     build_prompt_context,
     build_user_request_str,
-    render_past_steps,
 )
 from graphloom.prompt.stack import PromptStack
 
@@ -26,22 +26,14 @@ async def build_llm_messages(state: AgentState, prompt_stack: PromptStack) -> Li
     system_message: str = await prompt_stack.build_system_messages()
     messages.append(SystemMessage(content=system_message))
 
-    past_steps = list(state.get("past_steps", []) or [])
-    history_blocks = render_past_steps(past_steps)
-    if len(history_blocks) > 1:
-        messages.append(HumanMessage(content=[
-            *({"type": "text", "text": block} for block in history_blocks[:-1]),
-        ]))
-        messages.append(HumanMessage(content="</agent_history>"))
-    else:
-        messages.append(HumanMessage(content=history_blocks[0]))
+    messages.append(build_past_steps_message(list(state.get("past_steps", []) or [])))
 
     conversation = list(state.get("conversation", []) or [])
     if conversation and isinstance(conversation[-1], HumanMessage):
         conversation = conversation[:-1]
     messages.extend(conversation)
 
-    current_hour = datetime.now().replace(minute=0, second=0, microsecond=0).isoformat()
+    current_hour = datetime.now().isoformat()
     prompt_context = build_prompt_context(
         state,
         current_time=current_hour,

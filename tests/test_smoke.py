@@ -146,7 +146,12 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
             assert kwargs == {"method": "function_calling"}
             return self
 
-        async def ainvoke(self, _messages):
+        async def ainvoke(self, messages):
+            roles = [message.type for message in messages]
+            assert roles[0] == "system"
+            assert "system" not in roles[1:]
+            assert messages[1].content[-1] == {"type": "text", "text": "</agent_history>"}
+            assert all(message.content != "</agent_history>" for message in messages)
             return GenericFindFaultOutput(
                 is_acceptable=True,
                 decisive_assessment="accepted",
@@ -157,7 +162,12 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
     result = await node({
         "current_delivery_manifest": manifest,
         "input_artifact_manifest": [],
-        "past_steps": [],
+        "past_steps": [{
+            "last_step_review": "Created the requested artifact.",
+            "working_notes": "",
+            "next_action": "Submit for review.",
+            "action_results": "Wrote result.txt.",
+        }],
         "observer_message_parts": [],
         "input_query": "Deliver hello.",
         "session_id": "structured-output-test",

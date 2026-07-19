@@ -1,13 +1,15 @@
 import json
 from typing import Any, Dict, List
 
+from langchain_core.messages import HumanMessage
+
 from graphloom.model.state import AgentState
 from graphloom.util.session_store import session_store
 
 
-def render_past_steps(past_steps: List[Dict[str, Any]]) -> List[str]:
+def build_past_steps_message(past_steps: List[Dict[str, Any]]) -> HumanMessage:
     if not past_steps:
-        return ["<agent_history>\n    New task, no operation history yet.\n</agent_history>"]
+        return HumanMessage(content="<agent_history>\n    New task, no operation history yet.\n</agent_history>")
 
     blocks = ["<agent_history>"]
     for idx, step in enumerate(past_steps):
@@ -43,7 +45,7 @@ def render_past_steps(past_steps: List[Dict[str, Any]]) -> List[str]:
         step_lines.append(f"</step_{idx + 1}>")
         blocks.append("\n".join(step_lines))
     blocks.append("</agent_history>")
-    return blocks
+    return HumanMessage(content=[{"type": "text", "text": block} for block in blocks])
 
 
 def _json_block(tag: str, value: Any) -> str:

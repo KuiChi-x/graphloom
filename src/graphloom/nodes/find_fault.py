@@ -8,7 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graphloom.model.state import AgentState
-from graphloom.prompt.context_renderer import _json_block, build_user_request_str, render_past_steps
+from graphloom.prompt.context_renderer import _json_block, build_past_steps_message, build_user_request_str
 from graphloom.prompt.find_fault_system_prompt import COMMON_FIND_FAULT_SYSTEM_PROMPT
 from graphloom.util.session_store import session_store
 
@@ -142,16 +142,9 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
         )
         messages: List[BaseMessage] = [SystemMessage(content=combined_system_prompt)]
 
-        history_blocks = render_past_steps(list(state.get("past_steps", []) or []))
-        if len(history_blocks) > 1:
-            messages.append(HumanMessage(content=[
-                *({"type": "text", "text": block} for block in history_blocks[:-1]),
-            ]))
-            messages.append(HumanMessage(content="</agent_history>"))
-        else:
-            messages.append(HumanMessage(content=history_blocks[0]))
+        messages.append(build_past_steps_message(list(state.get("past_steps", []) or [])))
 
-        # 2. Context (SystemMessage)
+        # 2. Context
         prompt_context = build_find_fault_context_str(state)
         if not prompt_context:
             feedback = "Find-fault rejected the delivery because the artifact content could not be read."
@@ -170,7 +163,7 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
                     }
                 ],
             }
-        messages.append(SystemMessage(content=prompt_context))
+        messages.append(HumanMessage(content=prompt_context))
 
         # 3. Observer messages
         observer_message_parts = list(state.get("observer_message_parts", []) or [])
