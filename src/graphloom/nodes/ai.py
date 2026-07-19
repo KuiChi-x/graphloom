@@ -11,14 +11,14 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables.config import RunnableConfig
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from graphloom.events import emit_step
 from graphloom.model.state import AgentState
 from graphloom.nodes.history import _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
-from graphloom.events import emit_step
-from graphloom.prompt.stack import PromptStack
 from graphloom.prompt.message_builder import build_llm_messages
+from graphloom.prompt.stack import PromptStack
 
 
 def _planned_step_id(state: AgentState, counter: int) -> str:
@@ -27,19 +27,16 @@ def _planned_step_id(state: AgentState, counter: int) -> str:
     return f"{current_agent_name}:{session_id}:step:{counter}"
 
 
-def _chunk_text(content: Any) -> str:
-    """从 AIMessageChunk.content 取纯文本增量(content 可能是 str 或 v1 的块列表)。"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: List[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") in (None, "text"):
-                parts.append(str(block.get("text") or ""))
-        return "".join(parts)
-    return ""
+def _chunk_parts(message: Any) -> tuple[str, str]:
+    """Read text and reasoning from LangChain's standard content blocks."""
+    text: List[str] = []
+    reasoning: List[str] = []
+    for block in message.content_blocks:
+        if block.get("type") == "text":
+            text.append(str(block.get("text") or ""))
+        elif block.get("type") == "reasoning":
+            reasoning.append(str(block.get("reasoning") or ""))
+    return "".join(text), "".join(reasoning)
 
 
 def _build_pending_step(
@@ -115,11 +112,7 @@ async def _astream_with_retry(llm, messages, config: RunnableConfig):
     async for chunk in llm.astream(messages, config=config):
         merged = chunk if merged is None else merged + chunk
 
-        # Extract content delta (text portion only)
-        content_delta = _chunk_text(getattr(chunk, "content", ""))
-
-        # reasoning 增量:ReasoningChatOpenAI 每个 chunk 的 additional_kwargs.reasoning_content
-        piece = str((getattr(chunk, "additional_kwargs", {}) or {}).get("reasoning_content") or "")
+        content_delta, piece = _chunk_parts(chunk)
         reasoning_delta = ""
         if piece:
             if piece.startswith(reasoning_seen) and len(piece) > len(reasoning_seen):
@@ -175,7 +168,7 @@ def create_ai_node(
         tool_calls = list(getattr(response, "tool_calls", []) or [])
         if tool_calls:
             next_counter = int(state.get("step_counter") or 0) + 1
-            content_text = _chunk_text(getattr(response, "content", ""))
+            content_text, _ = _chunk_parts(response)
             pending_step = _build_pending_step(
                 state, tool_calls, next_counter,
                 think=reasoning_text, content=content_text,

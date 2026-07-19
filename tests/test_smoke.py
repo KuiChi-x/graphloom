@@ -3,13 +3,15 @@ import asyncio
 from typing import cast
 
 from dotenv import load_dotenv
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk
 from langchain_core.tools import tool
-from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import NodeCancelledError
 
 from graphloom import build_agent_graph
+from graphloom.nodes.ai import _astream_with_retry
+from graphloom.nodes.find_fault import GenericFindFaultOutput, create_find_fault_node
 
 
 class _FakeLLM:
@@ -40,7 +42,7 @@ async def test_build_and_run_minimal():
     graph = build_agent_graph(
         custom_system_prompt="You are a test agent.",
         tools=[_dummy],
-        llm=cast(ChatLiteLLM, _FakeLLM()),
+        llm=cast(BaseChatModel, _FakeLLM()),
         allow_direct_reply=True,
     )
     result = await graph.ainvoke(
@@ -57,7 +59,7 @@ async def test_follow_up_request_uses_checkpoint_conversation_history():
     graph = build_agent_graph(
         custom_system_prompt="You are a test agent.",
         tools=[_dummy],
-        llm=cast(ChatLiteLLM, llm),
+        llm=cast(BaseChatModel, llm),
         allow_direct_reply=True,
         checkpointer=checkpointer,
     )
@@ -100,6 +102,71 @@ async def test_follow_up_request_uses_checkpoint_conversation_history():
     ]
 
 
+async def test_streams_standard_reasoning_content_blocks():
+    cases = [
+        AIMessageChunk(
+            content=[{
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "OpenAI thought"}],
+            }],
+            response_metadata={"model_provider": "openai"},
+        ),
+        AIMessageChunk(
+            content=[{"type": "thinking", "thinking": "Anthropic thought"}],
+            response_metadata={"model_provider": "anthropic"},
+        ),
+    ]
+
+    for chunk, expected in zip(cases, ("OpenAI thought", "Anthropic thought")):
+        events = []
+
+        class ChunkLLM:
+            async def astream(self, _messages, config=None):
+                yield chunk
+
+        async def emit(event_type, payload):
+            events.append((event_type, payload))
+
+        _, reasoning = await _astream_with_retry(
+            ChunkLLM(), [], {"configurable": {"event_emitter": emit}}
+        )
+
+        assert reasoning == expected
+        assert events == [("ai_delta", {"content": "", "reasoning": expected})]
+
+
+async def test_find_fault_uses_function_calling_structured_output(tmp_path):
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("hello", encoding="utf-8")
+    manifest = [{"path": str(artifact), "type": "text"}]
+
+    class StructuredLLM:
+        def with_structured_output(self, schema, **kwargs):
+            assert schema is GenericFindFaultOutput
+            assert kwargs == {"method": "function_calling"}
+            return self
+
+        async def ainvoke(self, _messages):
+            return GenericFindFaultOutput(
+                is_acceptable=True,
+                decisive_assessment="accepted",
+                confidence=1.0,
+            )
+
+    node = create_find_fault_node("Review the artifact.", StructuredLLM())
+    result = await node({
+        "current_delivery_manifest": manifest,
+        "input_artifact_manifest": [],
+        "past_steps": [],
+        "observer_message_parts": [],
+        "input_query": "Deliver hello.",
+        "session_id": "structured-output-test",
+    })
+
+    assert result["current_delivery_manifest"] == manifest
+    assert result["tool_result_history"][0]["has_error"] is False
+
+
 
 
 async def test_cancelled_turn_keeps_user_message_for_next_request():
@@ -115,7 +182,7 @@ async def test_cancelled_turn_keeps_user_message_for_next_request():
     graph = build_agent_graph(
         custom_system_prompt="You are a test agent.",
         tools=[_dummy],
-        llm=cast(ChatLiteLLM, llm),
+        llm=cast(BaseChatModel, llm),
         allow_direct_reply=True,
         checkpointer=checkpointer,
     )

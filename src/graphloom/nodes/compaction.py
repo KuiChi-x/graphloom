@@ -28,10 +28,10 @@ from graphloom.config import (
     COMPACT_TRIGGER_RATIO,
     MODEL_CONTEXT_WINDOW,
 )
-from graphloom.model.state import AgentState
-from graphloom.prompt.stack import PromptStack
 from graphloom.model.base_tool_input import StandardThoughtInput
+from graphloom.model.state import AgentState
 from graphloom.prompt.message_builder import build_llm_messages
+from graphloom.prompt.stack import PromptStack
 from graphloom.util.token_counter import count_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -180,7 +180,7 @@ async def _summarize_old_steps(
     # bind BEFORE with_structured_output so the provider sees max_tokens.
     structured_llm = (
         llm.bind(max_tokens=_max_output_tokens())
-        .with_structured_output(StandardThoughtInput, method="json_schema", strict=False)
+        .with_structured_output(StandardThoughtInput, method="function_calling")
     )
 
     system = COMPACTION_SYSTEM_PROMPT.format(

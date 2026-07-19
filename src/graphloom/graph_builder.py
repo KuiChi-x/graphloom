@@ -9,7 +9,7 @@ the loop and the structural nodes.
 """
 from typing import Any, Callable, List, Optional, Sequence
 
-from langchain_litellm import ChatLiteLLM
+from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, StateGraph
 
 from graphloom.model.state import AgentState
@@ -36,7 +36,7 @@ def build_agent_graph(
     *,
     custom_system_prompt: str,
     tools: List[Any],
-    llm: ChatLiteLLM,
+    llm: BaseChatModel,
     find_fault: Optional[Any] = None,
     custom_find_fault: Optional[Callable] = None,
     observer: Optional[Callable] = None,
