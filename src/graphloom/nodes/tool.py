@@ -53,14 +53,12 @@ def _build_runtime_context(
         *,
         session_id: str,
         user_id: str,
-        enforce_approved_subset: bool,
         current_agent_name: str,
         host_context: Dict[str, Any],
 ) -> Dict[str, Any]:
     ctx = {
         "session_id": session_id,
         "user_id": user_id,
-        "enforce_approved_subset": enforce_approved_subset,
         "current_agent_name": current_agent_name,
     }
     # Host injects whatever its tools need (ws_handler, cancel_event, …) via
@@ -165,7 +163,6 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             }
 
         tool_calls = list(last_ai_message.tool_calls or [])
-        tool_map_has_subagents = "dispatch_subagents" in tool_map
 
         new_history_entries: List[Dict[str, Any]] = []
         accumulated_state_patch: Dict[str, Any] = {}
@@ -175,7 +172,6 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             runtime_context = _build_runtime_context(
                 session_id=session_id,
                 user_id=user_id,
-                enforce_approved_subset=(name == "deliver_artifact" and tool_map_has_subagents),
                 current_agent_name=current_agent_name,
                 host_context=host_context,
             )

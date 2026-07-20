@@ -353,10 +353,6 @@ async def deliver_artifact(artifact_paths: List[str], final_reply: str = "", **k
     session_id = runtime_context.get("session_id") or kwargs.get("session_id", "default")
     session_dir = _get_session_dir(session_id, runtime_context)
     producer = str(runtime_context.get("current_agent_name") or kwargs.get("current_agent_name") or "main").strip()
-    approved_manifest = list(kwargs.get("approved_artifact_manifest", []) or [])
-    enforce_approved_subset = bool(
-        runtime_context.get("enforce_approved_subset", kwargs.get("enforce_approved_subset"))
-    )
 
     valid_paths = []
     missing_files = []
@@ -377,37 +373,22 @@ async def deliver_artifact(artifact_paths: List[str], final_reply: str = "", **k
             )
         }
 
-    if enforce_approved_subset:
-        approved_paths = {
-            os.path.abspath(str(item.get("path") or "").strip())
-            for item in approved_manifest
-            if str(item.get("path") or "").strip()
-        }
-        invalid_paths = sorted(path for path in valid_paths if path not in approved_paths)
-        if invalid_paths:
-            return {
-                "delivery_error": (
-                    "Main graph delivery failed: only artifacts from approved_artifact_manifest can be delivered. "
-                    f"Invalid paths: {', '.join(invalid_paths)}"
-                )
-            }
-
     delivery_status = session_store.get(session_id, "delivery_status", {}) or {}
 
     # Auto-promote every runtime mount registered in this session
+    # (sandbox engine / dumped JS/WASM mounted for replay).
     auto_added_paths: List[str] = []
-    if not enforce_approved_subset:
-        seen = {os.path.abspath(p) for p in valid_paths}
-        for entry in delivery_status.values():
-            if "kind:runtime_mount" not in (entry.get("tags") or []):
-                continue
-            mount_abs = os.path.abspath(str(entry.get("path") or "").strip())
-            if not mount_abs or mount_abs in seen:
-                continue
-            if not os.path.exists(mount_abs):
-                continue
-            auto_added_paths.append(mount_abs)
-            seen.add(mount_abs)
+    seen = {os.path.abspath(p) for p in valid_paths}
+    for entry in delivery_status.values():
+        if "kind:runtime_mount" not in (entry.get("tags") or []):
+            continue
+        mount_abs = os.path.abspath(str(entry.get("path") or "").strip())
+        if not mount_abs or mount_abs in seen:
+            continue
+        if not os.path.exists(mount_abs):
+            continue
+        auto_added_paths.append(mount_abs)
+        seen.add(mount_abs)
 
     delivered_paths = valid_paths + auto_added_paths
 
