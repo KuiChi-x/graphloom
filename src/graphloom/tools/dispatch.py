@@ -2,10 +2,12 @@
 
 Groups run in ascending `group_id` order; same-group steps run in parallel.
 The framework threads the parent graph's `checkpointer` into each sub-graph,
-and propagates `runtime_context` (which the host populates with callbacks,
-cancel_event, artifact_base_dir, etc.) so sub-tools behave like the parent's.
-HITL/plan-approval and live UI observability are NOT done here — the host
-hooks LangGraph callbacks or wraps the tool for those.
+propagates parent configurable (event_emitter / cancel_event / runtime_context)
+into children, and emits transport-agnostic lifecycle events via event_emitter:
+  - subagent_state  (running | done | error | skipped)
+  - subagent_reply  (final_reply text)
+
+Hosts map those events to their own UI wire (WS codes, SSE, logs).
 """
 import asyncio
 import inspect
@@ -17,10 +19,12 @@ from collections import defaultdict
 from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from graphloom.config import SUBAGENT_MAX_CONCURRENCY
+from graphloom.events import emit_step
 from graphloom.model.artifact_manifest import merge_artifact_manifest
 from graphloom.model.base_tool_input import PlannerThoughtInput
 from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
@@ -152,10 +156,12 @@ def _resolve_subagent(subagents: List[SubAgentSpec], step: SubAgentTask) -> SubA
 
 def _build_sub_state(
     *,
+    session_id: str,
     step: SubAgentTask,
     spec: SubAgentSpec,
     input_artifact_manifest: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    child_session_id = _build_child_session_id(session_id, spec, step)
     step_request = _render_step_request(step)
     blocks = [
         f"<planned_step_request>\n{step_request}\n</planned_step_request>",
@@ -169,9 +175,11 @@ def _build_sub_state(
     return {
         "messages": [bootstrap_message],
         "input_query": step_request,
+        "session_id": child_session_id,
         "current_agent_name": spec.agent_name,
         "input_artifact_manifest": input_artifact_manifest,
     }
+
 
 
 def _extract_final_reply(result: Any) -> str:
@@ -215,7 +223,7 @@ async def _update_agent_status(agent: Any, config: Dict[str, Any], status: str) 
 
 def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: Any = None):
     @tool("dispatch_subagents", args_schema=DispatchSubagentsInput)
-    async def dispatch_subagents(steps: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+    async def dispatch_subagents(steps: List[Dict[str, Any]], config: RunnableConfig = None, **kwargs) -> Dict[str, Any]:
         """Dispatch a compact grouped next-phase plan to configured subagents. Use when delegation is genuinely useful; groups run sequentially and same-group steps run in parallel."""
         parsed_steps = [step if isinstance(step, SubAgentTask) else SubAgentTask(**step) for step in list(steps or [])]
         if not parsed_steps:
@@ -236,8 +244,14 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
         session_id = str(kwargs.get("session_id") or "default")
         runtime_context = dict(kwargs.get("runtime_context") or {})
         user_id = str(runtime_context.get("user_id") or kwargs.get("user_id") or session_id or "default")
-        cancel_event = runtime_context.get("cancel_event")
-        sub_callbacks = list(runtime_context.get("callbacks") or [])
+
+        # Parent graph config is injected by the tool runner (RunnableConfig),
+        # not read from a contextvar — async fan-out (gather) can drop contextvars.
+        parent_conf = dict((config or {}).get("configurable") or {})
+        cancel_event = parent_conf.get("cancel_event") or runtime_context.get("cancel_event")
+        parent_emitter = parent_conf.get("event_emitter")
+        # Config object so emit_step finds the parent emitter for lifecycle events.
+        parent_emit_config = {"configurable": parent_conf} if parent_conf else {}
 
         rolling_manifest = merge_artifact_manifest(
             list(kwargs.get("input_artifact_manifest", []) or []),
@@ -249,6 +263,34 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
 
         dispatch_results: List[Dict[str, Any]] = []
         abort_remaining = False
+
+        async def _emit_state(
+            *,
+            status: str,
+            step: SubAgentTask,
+            agent_name: str,
+            group_id: int,
+            child_session_id: str,
+            error: str | None = None,
+            artifacts: List[Dict[str, Any]] | None = None,
+        ) -> None:
+            data: Dict[str, Any] = {
+                "status": status,
+                "task_id": step.task_id,
+                "workstream_id": str(step.task_id),
+                "title": step.title or f"Task {step.task_id}",
+                "task": step.instruction or "",
+                "agent_name": agent_name,
+                "group_id": group_id,
+                "child_session_id": child_session_id,
+                "parent_session_id": session_id,
+                "session_id": child_session_id,
+            }
+            if error is not None:
+                data["error"] = error
+            if artifacts:
+                data["artifacts"] = list(artifacts)
+            await emit_step(parent_emit_config, "subagent_state", data)
 
         for group_id in sorted(grouped):
             group_steps = sorted(grouped[group_id], key=lambda item: int(item.task_id))
@@ -262,6 +304,14 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
                         "[dispatch_subagents] task_id=%s agent=%s SKIPPED: "
                         "upstream group failed",
                         step.task_id, step.agent_name,
+                    )
+                    await _emit_state(
+                        status="skipped",
+                        step=step,
+                        agent_name=step.agent_name,
+                        group_id=group_id,
+                        child_session_id=child_sid,
+                        error="Skipped: upstream group failed",
                     )
                     dispatch_results.append({
                         "task_id": step.task_id,
@@ -283,32 +333,66 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
                     # Backward-compat: factory without checkpointer kwarg
                     agent = spec.factory()
                 child_session_id = _build_child_session_id(session_id, spec, step)
+
+                child_runtime_context = dict(runtime_context)
+                child_runtime_context.update({
+                    "user_id": user_id,
+                    "session_id": child_session_id,
+                    "current_agent_name": spec.agent_name,
+                })
+                # Child gets the same event_emitter as parent so think/tool events
+                # stream; host emitters should seed/route by payload session_id.
+                child_configurable: Dict[str, Any] = {
+                    "thread_id": child_session_id,
+                    "user_id": user_id,
+                    "cancel_event": cancel_event,
+                    "runtime_context": child_runtime_context,
+                }
+                if parent_emitter is not None:
+                    child_configurable["event_emitter"] = parent_emitter
+                # Pass through host-only handles if present (ws_handler, etc.).
+                for key in ("ws_handler",):
+                    if key in parent_conf:
+                        child_configurable[key] = parent_conf[key]
+
                 sub_config = {
-                    "callbacks": sub_callbacks,
-                    "configurable": {
-                        "thread_id": child_session_id,
-                        "user_id": user_id,
-                        "cancel_event": cancel_event,
-                        # Propagate the host's runtime_context so sub-tools get
-                        # artifact_base_dir, callbacks, cancel_event, etc.
-                        "runtime_context": runtime_context,
-                    },
+                    "configurable": child_configurable,
                     "recursion_limit": 1000,
                 }
+
+                await _emit_state(
+                    status="running",
+                    step=step,
+                    agent_name=spec.agent_name,
+                    group_id=group_id,
+                    child_session_id=child_session_id,
+                )
+
                 result = None
                 error: BaseException | None = None
                 try:
                     result = await agent.ainvoke(
                         _build_sub_state(
+                            session_id=session_id,
                             step=step,
                             spec=spec,
-                            input_artifact_manifest=_filter_manifest(rolling_manifest, list(step.consumed_artifact_paths or [])),
+                            input_artifact_manifest=_filter_manifest(
+                                rolling_manifest, list(step.consumed_artifact_paths or [])
+                            ),
                         ),
                         config=sub_config,
                     )
                 except BaseException as exc:
                     error = exc
                     await _update_agent_status(agent, sub_config, "error")
+                    await _emit_state(
+                        status="error",
+                        step=step,
+                        agent_name=spec.agent_name,
+                        group_id=group_id,
+                        child_session_id=child_session_id,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                     raise
                 finally:
                     await _run_cleanup_hook(
@@ -324,6 +408,28 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
                     )
                 approved_manifest = list(result.get("approved_artifact_manifest", []) or [])
                 final_reply_text = _extract_final_reply(result)
+                # Emit done first (carries this child's artifact manifest) so hosts
+                # can render the sub-agent's artifact area, then the reply text.
+                await _emit_state(
+                    status="done",
+                    step=step,
+                    agent_name=spec.agent_name,
+                    group_id=group_id,
+                    child_session_id=child_session_id,
+                    artifacts=approved_manifest,
+                )
+                if final_reply_text:
+                    await emit_step(parent_emit_config, "subagent_reply", {
+                        "task_id": step.task_id,
+                        "workstream_id": str(step.task_id),
+                        "agent_name": spec.agent_name,
+                        "group_id": group_id,
+                        "child_session_id": child_session_id,
+                        "parent_session_id": session_id,
+                        "session_id": child_session_id,
+                        "text": final_reply_text,
+                        "artifacts": approved_manifest,
+                    })
                 return {
                     "task_id": step.task_id,
                     "workstream_id": str(step.task_id),

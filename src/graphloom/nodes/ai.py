@@ -95,7 +95,15 @@ def _build_pending_step(
     ),
     reraise=True,
 )
-async def _astream_with_retry(llm, messages, config: RunnableConfig):
+async def _astream_with_retry(
+    llm,
+    messages,
+    config: RunnableConfig,
+    *,
+    agent_name: str = "main",
+    session_id: str = "default",
+    step_index: int = 0,
+):
     """流式调用 LLM,合并出完整 AIMessage 返回。
 
     返回 (merged_ai_message, reasoning_total):merged 含 content 全文,
@@ -104,7 +112,8 @@ async def _astream_with_retry(llm, messages, config: RunnableConfig):
     Each chunk is also published via event_emitter (if injected) as an
     "ai_delta" event so the host can stream token/reasoning to its UI in
     real-time — this is the primary streaming path, not a side-effect of
-    astream_events.
+    astream_events. Identity fields (agent/session/step) are included so the
+    host can route tokens before step_planned arrives.
     """
     merged = None
     reasoning_seen = ""
@@ -131,6 +140,9 @@ async def _astream_with_retry(llm, messages, config: RunnableConfig):
             await emit_step(config, "ai_delta", {
                 "content": content_delta,
                 "reasoning": reasoning_delta,
+                "agent_name": agent_name,
+                "session_id": session_id,
+                "step_index": step_index,
             })
 
     return merged, reasoning_seen
@@ -161,9 +173,21 @@ def create_ai_node(
         else:
             llm_to_use = _static_llm
 
+        agent_name = str(state.get("current_agent_name") or "main")
+        session_id = str(state.get("session_id") or "default")
+        # Tokens stream before the step is planned; use the upcoming 1-based index.
+        step_index = int(state.get("step_counter") or 0) + 1
+
         messages = await build_llm_messages(state, prompt_stack)
 
-        response, reasoning_text = await _astream_with_retry(llm_to_use, messages, config)
+        response, reasoning_text = await _astream_with_retry(
+            llm_to_use,
+            messages,
+            config,
+            agent_name=agent_name,
+            session_id=session_id,
+            step_index=step_index,
+        )
         updates: Dict[str, object] = {"latest_ai_message": response}
         tool_calls = list(getattr(response, "tool_calls", []) or [])
         if tool_calls:
@@ -181,8 +205,8 @@ def create_ai_node(
             await emit_step(config, "step_planned", {
                 "step_id": pending_step["step_id"],
                 "step_index": next_counter,
-                "agent_name": str(state.get("current_agent_name") or "main"),
-                "session_id": str(state.get("session_id") or "default"),
+                "agent_name": agent_name,
+                "session_id": session_id,
                 "last_step_review": pending_step["last_step_review"],
                 "working_notes": pending_step["working_notes"],
                 "next_action": pending_step["next_action"],

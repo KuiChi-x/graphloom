@@ -49,6 +49,19 @@ def _current_step_number(state: AgentState) -> int:
     return len(past_steps)
 
 
+def _turn_index_from_step_id(step_id: str) -> int:
+    """The UI-facing turn index = the 1-based counter encoded in the step_id
+    (``agent:session:step:{counter}``). ai_node / history_node emit that same
+    counter as ``step_index``; tool events MUST match it so a step's think,
+    tool chips, and result all land in one turn block. Do not use the internal
+    past_steps ordinal here — it is 0-based and drifts after compaction."""
+    tail = str(step_id or "").rsplit(":step:", 1)[-1]
+    try:
+        return int(tail)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_runtime_context(
         *,
         session_id: str,
@@ -198,20 +211,26 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 }
 
             invoke_args = dict(raw_args)
+            # Turn index must match ai_node / history_node (the step_id counter),
+            # so a step's think, tool chips, and result share one UI turn block.
+            turn_index = _turn_index_from_step_id(current_step_id)
+            # Pass the graph config into the tool so builtins that need the
+            # parent event_emitter / cancel_event (dispatch_subagents) receive it
+            # by injection — never via a contextvar that async fan-out can drop.
             await emit_step(config, "tool_start", {
                 "step_id": current_step_id,
-                "step_index": step_number,
+                "step_index": turn_index,
                 "agent_name": current_agent_name,
                 "session_id": session_id,
                 "tool_name": name,
                 "tool_args": _filter_thought_args(raw_args),
             })
             try:
-                result = await tool.ainvoke(invoke_args)
+                result = await tool.ainvoke(invoke_args, config=config)
                 result_str = _stringify_tool_result(result)
                 await emit_step(config, "tool_end", {
                     "step_id": current_step_id,
-                    "step_index": step_number,
+                    "step_index": turn_index,
                     "agent_name": current_agent_name,
                     "session_id": session_id,
                     "tool_name": name,
@@ -235,7 +254,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 logging.error(err_msg)
                 await emit_step(config, "tool_end", {
                     "step_id": current_step_id,
-                    "step_index": step_number,
+                    "step_index": turn_index,
                     "agent_name": current_agent_name,
                     "session_id": session_id,
                     "tool_name": name,

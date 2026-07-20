@@ -8,10 +8,19 @@ is a tool the caller supplies; the framework wires only the loop.
 
 Quick start::
 
-    from graphloom import build_agent_graph
+    from graphloom import build_agent_graph, BaseEventEmitter
+
+    class Printer(BaseEventEmitter):
+        async def on_ai_delta(self, payload):
+            print(payload.get("content") or "", end="")
+
     graph = build_agent_graph(custom_system_prompt=..., tools=[...], llm=...)
-    await graph.ainvoke({"input_query": "..."})
+    await graph.ainvoke(
+        {"input_query": "..."},
+        config={"configurable": {"event_emitter": Printer()}},
+    )
 """
+from graphloom.events import BaseEventEmitter
 from graphloom.graph_builder import build_agent_graph
 from graphloom.model.base_tool_input import PlannerThoughtInput, StandardThoughtInput
 from graphloom.model.state import AgentState
@@ -24,6 +33,7 @@ __all__ = [
     "SubAgentRunContext",
     "StandardThoughtInput",
     "PlannerThoughtInput",
+    "BaseEventEmitter",
 ]
 
 __version__ = "0.1.0"
