@@ -381,6 +381,10 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
                             ),
                         ),
                         config=sub_config,
+                        # Match host: async mid-run checkpoints for crash/HITL
+                        # resume; host schedules keep_latest prune after the
+                        # parent ainvoke returns so child intermediates are trimmed.
+                        durability="async",
                     )
                 except BaseException as exc:
                     error = exc
