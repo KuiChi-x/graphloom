@@ -63,6 +63,7 @@ def create_history_node():
             action_results += f"Executed tool {tool_name} with args:{filtered_args}, tool return: {result}.\n"
 
             tool_calls_data.append({
+                "call_id": str(tool_result.get("call_id") or ""),
                 "tool_name": tool_name,
                 "tool_args": filtered_args,
                 "result": result,

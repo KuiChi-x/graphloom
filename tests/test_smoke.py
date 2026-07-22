@@ -4,7 +4,7 @@ from typing import cast
 
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import NodeCancelledError
@@ -12,6 +12,7 @@ from langgraph.errors import NodeCancelledError
 from graphloom import build_agent_graph
 from graphloom.nodes.ai import _astream_with_retry
 from graphloom.nodes.find_fault import GenericFindFaultOutput, create_find_fault_node
+from graphloom.nodes.tool import create_tool_node
 
 
 class _FakeLLM:
@@ -133,6 +134,41 @@ async def test_streams_standard_reasoning_content_blocks():
 
         assert reasoning == expected
         assert events == [("ai_delta", {"content": "", "reasoning": expected})]
+
+
+async def test_same_step_same_tool_calls_keep_distinct_ids():
+    events = []
+
+    class Emitter:
+        async def __call__(self, event_type, payload):
+            events.append((event_type, payload))
+
+    @tool
+    def echo(value: str) -> str:
+        """Return the supplied value."""
+        return value
+
+    node = create_tool_node([echo])
+    state = {
+        "current_agent_name": "browser",
+        "session_id": "s1",
+        "past_steps": [{
+            "step_id": "browser:s1:step:1",
+            "status": "pending_tool",
+        }],
+        "latest_ai_message": AIMessage(content="", tool_calls=[
+            {"name": "echo", "args": {"value": "first"}, "id": "call-first", "type": "tool_call"},
+            {"name": "echo", "args": {"value": "second"}, "id": "call-second", "type": "tool_call"},
+        ]),
+    }
+
+    result = await node(state, {"configurable": {"event_emitter": Emitter()}})
+
+    starts = [payload for event, payload in events if event == "tool_start"]
+    ends = [payload for event, payload in events if event == "tool_end"]
+    assert [payload["call_id"] for payload in starts] == ["call-first", "call-second"]
+    assert [payload["call_id"] for payload in ends] == ["call-first", "call-second"]
+    assert [item["call_id"] for item in result["tool_result_history"]] == ["call-first", "call-second"]
 
 
 async def test_find_fault_uses_function_calling_structured_output(tmp_path):
