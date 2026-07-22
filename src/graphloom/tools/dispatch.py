@@ -16,7 +16,9 @@ import logging
 import os
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List
+from uuid import uuid4
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
@@ -228,6 +230,8 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
         parsed_steps = [step if isinstance(step, SubAgentTask) else SubAgentTask(**step) for step in list(steps or [])]
         if not parsed_steps:
             return {"approved_artifact_manifest": []}
+        dispatch_run_id = uuid4().hex
+        dispatch_created_at = datetime.now(timezone.utc).isoformat()
 
         # Hard cap — reject the whole call if the planner tried to schedule
         if len(parsed_steps) > SUBAGENT_MAX_CONCURRENCY:
@@ -276,6 +280,8 @@ def create_dispatch_subagents_tool(subagents: List[SubAgentSpec], checkpointer: 
         ) -> None:
             data: Dict[str, Any] = {
                 "status": status,
+                "dispatch_id": f"{dispatch_run_id}:{step.task_id}",
+                "created_at": dispatch_created_at,
                 "task_id": step.task_id,
                 "workstream_id": str(step.task_id),
                 "title": step.title or f"Task {step.task_id}",

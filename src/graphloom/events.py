@@ -66,8 +66,8 @@ class BaseEventEmitter:
         agent_name, session_id, step_index, step_id
         content, reasoning                       # ai_delta
         last_step_review, working_notes, next_action, tool_calls  # step_*
-        tool_name, tool_args, result, has_error  # tool_*
-        status, child_session_id, parent_session_id, task_id, title, task, error  # subagent_state
+        tool_name, tool_args, result, has_error, call_id  # tool_*
+        status, dispatch_id, child_session_id, parent_session_id, task_id, title, task, error  # subagent_state
         text                                     # subagent_reply
     """
 

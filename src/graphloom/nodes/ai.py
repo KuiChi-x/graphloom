@@ -61,6 +61,7 @@ def _build_pending_step(
         tool_name = str(tool_call.get("name") or "")
         filtered_args = _filter_thought_args(raw_args)
         tool_calls_data.append({
+            "call_id": str(tool_call.get("id") or ""),
             "tool_name": tool_name,
             "tool_args": filtered_args,
             "result": "",

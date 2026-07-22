@@ -20,10 +20,17 @@ def _contains_error(text: str) -> bool:
     return bool(_ERROR_RE.search(text))
 
 
-def _make_tool_history_entry(step: int, tool_name: str, tool_args: Dict[str, Any], result: str, has_error: bool) -> \
-        Dict[str, Any]:
+def _make_tool_history_entry(
+        step: int,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        result: str,
+        has_error: bool,
+        call_id: str = "",
+) -> Dict[str, Any]:
     return {
         "step": step,
+        "call_id": call_id,
         "tool_name": tool_name,
         "tool_args": tool_args,
         "result": result,
@@ -180,8 +187,13 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
         new_history_entries: List[Dict[str, Any]] = []
         accumulated_state_patch: Dict[str, Any] = {}
 
-        async def _run_tool_call(tool_call: Dict[str, Any], step_number: int) -> Dict[str, Any]:
+        async def _run_tool_call(
+                tool_call: Dict[str, Any],
+                step_number: int,
+                call_index: int,
+        ) -> Dict[str, Any]:
             name = str(tool_call["name"])
+            call_id = str(tool_call.get("id") or f"{current_step_id}:call:{call_index}")
             runtime_context = _build_runtime_context(
                 session_id=session_id,
                 user_id=user_id,
@@ -203,6 +215,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 return {
                     "step": step_number,
                     "step_id": current_step_id,
+                    "call_id": call_id,
                     "tool_name": name,
                     "tool_args": raw_args,
                     "result": f"Tool not found: {name}",
@@ -219,6 +232,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             # by injection — never via a contextvar that async fan-out can drop.
             await emit_step(config, "tool_start", {
                 "step_id": current_step_id,
+                "call_id": call_id,
                 "step_index": turn_index,
                 "agent_name": current_agent_name,
                 "session_id": session_id,
@@ -230,6 +244,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 result_str = _stringify_tool_result(result)
                 await emit_step(config, "tool_end", {
                     "step_id": current_step_id,
+                    "call_id": call_id,
                     "step_index": turn_index,
                     "agent_name": current_agent_name,
                     "session_id": session_id,
@@ -241,6 +256,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 return {
                     "step": step_number,
                     "step_id": current_step_id,
+                    "call_id": call_id,
                     "tool_name": name,
                     "tool_args": raw_args,
                     "result": result_str,
@@ -254,6 +270,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 logging.error(err_msg)
                 await emit_step(config, "tool_end", {
                     "step_id": current_step_id,
+                    "call_id": call_id,
                     "step_index": turn_index,
                     "agent_name": current_agent_name,
                     "session_id": session_id,
@@ -265,6 +282,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 return {
                     "step": step_number,
                     "step_id": current_step_id,
+                    "call_id": call_id,
                     "tool_name": name,
                     "tool_args": raw_args,
                     "result": err_msg,
@@ -275,7 +293,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
         if tool_calls:
             execution_results = []
             for index, tool_call in enumerate(tool_calls):
-                result = await _run_tool_call(tool_call, current_step + index)
+                result = await _run_tool_call(tool_call, current_step + index, index)
                 execution_results.append(result)
 
             for item in execution_results:
@@ -285,6 +303,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     dict(item["tool_args"]),
                     str(item["result"]),
                     bool(item["has_error"]),
+                    str(item.get("call_id") or ""),
                 )
                 entry["step_id"] = str(item.get("step_id") or current_step_id)
                 new_history_entries.append(entry)
