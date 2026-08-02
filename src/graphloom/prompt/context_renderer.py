@@ -1,15 +1,34 @@
 import json
 from typing import Any, Dict, List
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from graphloom.model.state import AgentState
 from graphloom.util.session_store import session_store
 
 
-def build_past_steps_message(past_steps: List[Dict[str, Any]]) -> HumanMessage:
+def _cache_marker(llm: BaseChatModel | None) -> Dict[str, Any]:
+    if llm is not None and llm.get_lc_namespace()[-1] == "anthropic":
+        return {"cache_control": {"type": "ephemeral"}}
+    return {}
+
+
+def _cache_block(text: str, llm: BaseChatModel | None = None) -> Dict[str, Any]:
+    return {"type": "text", "text": text, **_cache_marker(llm)}
+
+
+def build_past_steps_message(
+    past_steps: List[Dict[str, Any]],
+    llm: BaseChatModel | None = None,
+) -> HumanMessage:
     if not past_steps:
-        return HumanMessage(content="<agent_history>\n    New task, no operation history yet.\n</agent_history>")
+        return HumanMessage(
+            content=[_cache_block(
+                "<agent_history>\n    New task, no operation history yet.\n</agent_history>",
+                llm,
+            )]
+        )
 
     blocks = ["<agent_history>"]
     for idx, step in enumerate(past_steps):
@@ -44,8 +63,11 @@ def build_past_steps_message(past_steps: List[Dict[str, Any]]) -> HumanMessage:
             step_lines.append(f"Action Results: {action_results}")
         step_lines.append(f"</step_{idx + 1}>")
         blocks.append("\n".join(step_lines))
-    blocks.append("</agent_history>")
-    return HumanMessage(content=[{"type": "text", "text": block} for block in blocks])
+
+    content = [{"type": "text", "text": block} for block in blocks]
+    content[-1].update(_cache_marker(llm))
+    content.append({"type": "text", "text": "</agent_history>"})
+    return HumanMessage(content=content)
 
 
 def _json_block(tag: str, value: Any) -> str:
