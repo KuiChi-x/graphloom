@@ -158,7 +158,18 @@ def create_ai_node(
 ):
     # llm is required — the framework never reaches into a host singleton.
     _all_tools = list(tools)
-    _static_llm = llm.bind_tools(_all_tools)
+    provider = llm.get_lc_namespace()[-1]
+
+    def bind_model(bound_tools):
+        bound = llm.bind_tools(bound_tools)
+        if provider == "openai" and getattr(llm, "use_responses_api", False):
+            return bound.bind(
+                prompt_cache_key=f"graphloom:openai/responses/{llm.model_name}",
+                prompt_cache_retention="24h",
+            )
+        return bound
+
+    _static_llm = bind_model(_all_tools)
     _cache: Dict[str, Any] = {"hidden": frozenset(), "llm": _static_llm}
 
     async def ai_node(state: AgentState, config: RunnableConfig) -> Dict[str, object]:
@@ -168,7 +179,7 @@ def create_ai_node(
             hidden: FrozenSet[str] = frozenset(tool_filter(state, config) or ())
             if hidden != _cache["hidden"]:
                 filtered = [t for t in _all_tools if t.name not in hidden]
-                _cache["llm"] = llm.bind_tools(filtered)
+                _cache["llm"] = bind_model(filtered)
                 _cache["hidden"] = hidden
             llm_to_use = _cache["llm"]
         else:
@@ -179,7 +190,7 @@ def create_ai_node(
         # Tokens stream before the step is planned; use the upcoming 1-based index.
         step_index = int(state.get("step_counter") or 0) + 1
 
-        messages = await build_llm_messages(state, prompt_stack)
+        messages = await build_llm_messages(state, prompt_stack, llm)
 
         response, reasoning_text = await _astream_with_retry(
             llm_to_use,

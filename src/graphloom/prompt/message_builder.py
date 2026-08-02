@@ -9,10 +9,12 @@ the real payload stay in sync.
 from datetime import datetime
 from typing import List
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from graphloom.model.state import AgentState
 from graphloom.prompt.context_renderer import (
+    _cache_block,
     build_past_steps_message,
     build_prompt_context,
     build_user_request_str,
@@ -20,13 +22,22 @@ from graphloom.prompt.context_renderer import (
 from graphloom.prompt.stack import PromptStack
 
 
-async def build_llm_messages(state: AgentState, prompt_stack: PromptStack) -> List[BaseMessage]:
+async def build_llm_messages(
+    state: AgentState,
+    prompt_stack: PromptStack,
+    llm: BaseChatModel | None = None,
+) -> List[BaseMessage]:
     messages: List[BaseMessage] = []
 
-    system_message: str = await prompt_stack.build_system_messages()
-    messages.append(SystemMessage(content=system_message))
+    messages.append(SystemMessage(content=[_cache_block(
+        await prompt_stack.build_system_messages(),
+        llm,
+    )]))
 
-    messages.append(build_past_steps_message(list(state.get("past_steps", []) or [])))
+    messages.append(build_past_steps_message(
+        list(state.get("past_steps", []) or []),
+        llm,
+    ))
 
     conversation = list(state.get("conversation", []) or [])
     if conversation and isinstance(conversation[-1], HumanMessage):
