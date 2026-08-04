@@ -39,10 +39,10 @@ async def build_llm_messages(
         llm,
     ))
 
-    conversation = list(state.get("conversation", []) or [])
-    if conversation and isinstance(conversation[-1], HumanMessage):
-        conversation = conversation[:-1]
-    messages.extend(conversation)
+    # conversation = list(state.get("conversation", []) or [])
+    # if conversation and isinstance(conversation[-1], HumanMessage):
+    #     conversation = conversation[:-1]
+    # messages.extend(conversation)
 
     current_hour = datetime.now().isoformat()
     prompt_context = build_prompt_context(
