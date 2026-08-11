@@ -160,16 +160,7 @@ def create_ai_node(
     _all_tools = list(tools)
     provider = llm.get_lc_namespace()[-1]
 
-    def bind_model(bound_tools):
-        bound = llm.bind_tools(bound_tools)
-        if provider == "openai" and getattr(llm, "use_responses_api", False):
-            return bound.bind(
-                prompt_cache_key=f"graphloom:openai/responses/{llm.model_name}",
-                prompt_cache_retention="24h",
-            )
-        return bound
-
-    _static_llm = bind_model(_all_tools)
+    _static_llm = llm.bind_tools(_all_tools)
     _cache: Dict[str, Any] = {"hidden": frozenset(), "llm": _static_llm}
 
     async def ai_node(state: AgentState, config: RunnableConfig) -> Dict[str, object]:
@@ -179,7 +170,7 @@ def create_ai_node(
             hidden: FrozenSet[str] = frozenset(tool_filter(state, config) or ())
             if hidden != _cache["hidden"]:
                 filtered = [t for t in _all_tools if t.name not in hidden]
-                _cache["llm"] = bind_model(filtered)
+                _cache["llm"] = llm.bind_tools(filtered)
                 _cache["hidden"] = hidden
             llm_to_use = _cache["llm"]
         else:
@@ -187,6 +178,14 @@ def create_ai_node(
 
         agent_name = str(state.get("current_agent_name") or "main")
         session_id = str(state.get("session_id") or "default")
+        if provider == "openai":
+            # Routing affinity hint: keep every turn of this session on the
+            # machine already holding its growing prefix. Scoped per agent too,
+            # since subagents in the same session run different system prompts
+            # and therefore are different prefixes.
+            llm_to_use = llm_to_use.bind(
+                prompt_cache_key=f"graphloom:{agent_name}:{session_id}"
+            )
         # Tokens stream before the step is planned; use the upcoming 1-based index.
         step_index = int(state.get("step_counter") or 0) + 1
 
