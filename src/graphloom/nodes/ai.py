@@ -19,6 +19,7 @@ from graphloom.nodes.history import _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
 from graphloom.prompt.message_builder import build_llm_messages
 from graphloom.prompt.stack import PromptStack
+from graphloom.util.model_info import provider_of, supports_explicit_cache_breakpoints
 
 
 def _planned_step_id(state: AgentState, counter: int) -> str:
@@ -158,7 +159,7 @@ def create_ai_node(
 ):
     # llm is required — the framework never reaches into a host singleton.
     _all_tools = list(tools)
-    provider = llm.get_lc_namespace()[-1]
+    provider = provider_of(llm)
 
     _static_llm = llm.bind_tools(_all_tools)
     _cache: Dict[str, Any] = {"hidden": frozenset(), "llm": _static_llm}
@@ -183,9 +184,12 @@ def create_ai_node(
             # machine already holding its growing prefix. Scoped per agent too,
             # since subagents in the same session run different system prompts
             # and therefore are different prefixes.
-            llm_to_use = llm_to_use.bind(
-                prompt_cache_key=f"graphloom:{agent_name}:{session_id}"
-            )
+            bind_kwargs: Dict[str, Any] = {
+                "prompt_cache_key": f"graphloom:{agent_name}:{session_id}"
+            }
+            if supports_explicit_cache_breakpoints(llm):
+                bind_kwargs["prompt_cache_options"] = {"mode": "explicit"}
+            llm_to_use = llm_to_use.bind(**bind_kwargs)
         # Tokens stream before the step is planned; use the upcoming 1-based index.
         step_index = int(state.get("step_counter") or 0) + 1
 

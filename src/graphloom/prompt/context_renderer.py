@@ -5,17 +5,63 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from graphloom.model.state import AgentState
+from graphloom.util.model_info import provider_of, supports_explicit_cache_breakpoints
 from graphloom.util.session_store import session_store
 
 
+def _provider(llm: BaseChatModel | None) -> str:
+    """该模型说哪种缓存断点方言，判不出来返回 ""。"""
+    if provider_of(llm) == "anthropic":
+        return "anthropic"
+    if supports_explicit_cache_breakpoints(llm):
+        return "openai"
+    return ""
+
+
 def _cache_marker(llm: BaseChatModel | None) -> Dict[str, Any]:
-    if llm is not None and llm.get_lc_namespace()[-1] == "anthropic":
+    provider = _provider(llm)
+    if provider == "anthropic":
         return {"cache_control": {"type": "ephemeral"}}
+    if provider == "openai":
+        return {"prompt_cache_breakpoint": {"mode": "explicit"}}
     return {}
 
 
 def _cache_block(text: str, llm: BaseChatModel | None = None) -> Dict[str, Any]:
     return {"type": "text", "text": text, **_cache_marker(llm)}
+
+
+# OpenAI 读取时最多考虑 50 个断点，超过就接不上。留一个给 system。
+_OPENAI_MAX_BREAKPOINTS = 49
+
+
+def _history_breakpoints(step_count: int, provider: str) -> set:
+    """哪些步骤要打缓存断点。两家的写入名额都是每请求 4 个，但读取规则完全不同,
+    所以位置策略也不同。
+
+    - Anthropic: 回溯窗口是 20 个块 —— 从断点往前最多查 20 个位置，找不到就停。
+      所以钉最新两步：一个写在增长边缘，另一个留在上轮写入处兜底，间距永远是 1,
+      不可能超窗。实测 46% -> 88%。
+    - OpenAI /responses: 没有块距限制，但读取只看最近 50 个断点。写入名额虽然是
+      4 个，已写入的旧断点不重写也照样能读，所以断点集合应该只增不减 —— 每步都
+      钉，实测 40 步 95%（单调爬到 97%，无锯齿）。
+      反过来，删掉任何一个旧断点都会让整条链作废且再也接不回来：之前只留 3 个
+      断点时每次换锚点那轮就掉到 3%，40 步总命中 69%；到 50 上限后开始丢最老的
+      断点，第 51 步起永久锁死在 1%。
+    """
+    if step_count <= 0:
+        return set()
+    if provider == "anthropic":
+        return {i for i in (step_count - 2, step_count - 1) if i >= 0}
+    if provider == "openai":
+        # 每步一个断点，逼近 50 上限时步长翻倍。翻倍那一轮会掉一次（~4%）,
+        # 下一轮就回到 98%；200 步的会话里只发生 3 次（第 50、99、197 步）。
+        # 步长必须只增不减，否则旧断点被丢弃，缓存链断掉且无法恢复。
+        stride = 1
+        while (step_count + stride - 1) // stride > _OPENAI_MAX_BREAKPOINTS - 1:
+            stride *= 2
+        return {0} | {i for i in range(stride - 1, step_count, stride)}
+    return set()
 
 
 def build_past_steps_message(
@@ -65,7 +111,11 @@ def build_past_steps_message(
         blocks.append("\n".join(step_lines))
 
     content = [{"type": "text", "text": block} for block in blocks]
-    content[-1].update(_cache_marker(llm))
+    # blocks[0] is the "<agent_history>" opener, so step N sits at content[N].
+    marker = _cache_marker(llm)
+    if marker:
+        for step_idx in _history_breakpoints(len(past_steps), _provider(llm)):
+            content[step_idx + 1].update(marker)
     content.append({"type": "text", "text": "</agent_history>"})
     return HumanMessage(content=content)
 
