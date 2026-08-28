@@ -28,13 +28,13 @@ class StandardThoughtInput(BaseModel):
     model_config = {"extra": "allow"}
 
     last_step_review: str = Field(
-        description="Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain."
+        description="Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain. Write in the same language as the user request."
     )
     working_notes: str = Field(
-        description="1-3 sentences of specific notes on this step and overall progress. Put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc."
+        description="1-3 sentences of specific notes on this step and overall progress. Put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc. Write in the same language as the user request."
     )
     next_action: str = Field(
-        description="State the next immediate goal and action to achieve it, in one clear sentence."
+        description="State the next immediate goal and action to achieve it, in one clear sentence. Write in the same language as the user request."
     )
 
 # ---------------------------------------------------------------------------

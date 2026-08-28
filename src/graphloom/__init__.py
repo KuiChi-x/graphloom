@@ -25,9 +25,11 @@ from graphloom.graph_builder import build_agent_graph
 from graphloom.model.base_tool_input import PlannerThoughtInput, StandardThoughtInput
 from graphloom.model.state import AgentState
 from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
+from graphloom.nodes.tool import report_outcome
 
 __all__ = [
     "build_agent_graph",
+    "report_outcome",
     "AgentState",
     "SubAgentSpec",
     "SubAgentRunContext",

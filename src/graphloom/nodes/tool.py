@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage
@@ -13,11 +12,31 @@ from graphloom.nodes.history import THOUGHT_FIELDS, _filter_thought_args
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
 from graphloom.util.message_utils import get_last_ai_message
 
-_ERROR_RE = re.compile(r"Traceback \(most recent call last\)|Error:|Exception:|FAILED", re.IGNORECASE)
+# 工具在返回值首行放这个标记自报成败。没有标记就算成功 —— 真正的失败走下面的
+# except 分支或 report_outcome，不靠猜。
+#
+# 曾经这里是拿正则在正文里搜 "Error:|Traceback|FAILED"，但工具的返回体往往裹着
+# 别人的内容：read_artifact 读一份写了 `except ImportError:` 的爬虫源码会被判红，
+# 抓回来的网页正文提到 "Error:" 也会；反过来 run_shell 里 exit!=0 但输出没这些词
+# （如 "can't open file"）又判成绿。裹别人内容的工具是多数，所以这个默认方向是错的。
+_OUTCOME_PREFIX = "\x00graphloom-outcome:"
 
 
-def _contains_error(text: str) -> bool:
-    return bool(_ERROR_RE.search(text))
+def report_outcome(text: str, *, failed: bool) -> str:
+    """给工具用：在返回值里标上成败，别让框架去正文里猜。
+
+    标记在首行、由框架摘掉，模型和前端都看不到它。只在工具自己知道失败了、但
+    又不想抛异常时才需要（比如 run_shell 拿到非零退出码）。
+    """
+    return f"{_OUTCOME_PREFIX}{'error' if failed else 'ok'}\n{text}"
+
+
+def _resolve_error(text: str) -> tuple[str, bool]:
+    """摘掉自报标记，返回（正文, 是否出错）。没有标记就算成功。"""
+    if not text.startswith(_OUTCOME_PREFIX):
+        return text, False
+    marker, _, rest = text.partition("\n")
+    return rest, marker[len(_OUTCOME_PREFIX):].strip() == "error"
 
 
 def _make_tool_history_entry(
@@ -241,7 +260,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             })
             try:
                 result = await tool.ainvoke(invoke_args, config=config)
-                result_str = _stringify_tool_result(result)
+                result_str, tool_failed = _resolve_error(_stringify_tool_result(result))
                 await emit_step(config, "tool_end", {
                     "step_id": current_step_id,
                     "call_id": call_id,
@@ -251,7 +270,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     "tool_name": name,
                     "tool_args": _filter_thought_args(raw_args),
                     "result": result_str,
-                    "has_error": _contains_error(result_str),
+                    "has_error": tool_failed,
                 })
                 return {
                     "step": step_number,
@@ -260,8 +279,8 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     "tool_name": name,
                     "tool_args": raw_args,
                     "result": result_str,
-                    "has_error": _contains_error(result_str),
-                    "raw_result": result,
+                    "has_error": tool_failed,
+                    "raw_result": result_str if isinstance(result, str) else result,
                 }
             except GraphBubbleUp:
                 raise

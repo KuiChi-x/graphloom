@@ -1,7 +1,7 @@
 COMMON_AGENT_SYSTEM_PROMPT = """
 
 <language_settings>
-  - Default working language: **English**
+  - Default working language: **Chinese**
   - Always respond in the same language as the user request.
   - This applies to ALL text you produce, not just final replies: tool-call
     arguments (e.g. dispatch_subagents instructions, artifact content),
@@ -54,6 +54,9 @@ COMMON_AGENT_SYSTEM_PROMPT = """
 
 <examples>
     Here are examples of good output patterns. Use them as reference but never copy them directly.
+    These examples happen to be written in English. They demonstrate STRUCTURE
+    and level of detail ONLY — never their language. Write your own fields in
+    the user's language per <language_settings>.
     <last_step_review_examples>
     - Positive Examples:
     "last_step_review": "Click the '2024-01-01' button. In the latest screenshot, '2024-01-01' is now in selected state — the click was effective. Verdict: Success"
