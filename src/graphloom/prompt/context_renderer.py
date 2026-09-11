@@ -5,13 +5,20 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from graphloom.model.state import AgentState
-from graphloom.util.model_info import provider_of, supports_explicit_cache_breakpoints
+from graphloom.util.model_info import (
+    is_real_anthropic_model,
+    supports_explicit_cache_breakpoints,
+)
 from graphloom.util.session_store import session_store
 
 
 def _provider(llm: BaseChatModel | None) -> str:
-    """该模型说哪种缓存断点方言，判不出来返回 ""。"""
-    if provider_of(llm) == "anthropic":
+    """该模型说哪种缓存断点方言，判不出来返回 ""。
+
+    判的是**模型**而不是客户端库：网关会把百炼 qwen / kimi / glm 挂在 Anthropic
+    协议线上并套 ``claude-`` 前缀，但它们的缓存规则跟 Anthropic 不兼容。
+    """
+    if is_real_anthropic_model(llm):
         return "anthropic"
     if supports_explicit_cache_breakpoints(llm):
         return "openai"
