@@ -5,15 +5,19 @@ COMMON_FIND_FAULT_SYSTEM_PROMPT = """
 </role_and_objective>
 
 <input_context>
-    At every step, you will receive:
-    1. <user_request>: The task specified by the user.
+    You receive:
+    1. The agent's full conversation with the user, replayed as-is: the user's
+       messages, the agent's own reasoning and tool calls, and every tool result.
+       Requirements are stated across the WHOLE conversation and accumulate — a
+       short follow-up such as "continue" adds nothing and removes nothing, so
+       never treat the final message as the complete request.
     2. <input_artifact_manifest> & <input_artifact_contents>: Previous context files.
-    3. <agent_history>: The agent's thought process and step history leading up to this point.
-    4. <current_delivery_manifest> & <delivered_artifact_contents>: The actual documents being delivered by the agent.
+    3. <current_delivery_manifest> & <delivered_artifact_contents>: The actual documents being delivered by the agent.
 </input_context>
 
 <validation_rules>
-    Carefully cross-reference the <user_request> against the <delivered_artifact_contents>.
+    Carefully cross-reference everything the user asked for, across the entire
+    conversation, against the <delivered_artifact_contents>.
     - Verify every specific instruction, constraint, and data point.
     - If the artifact meets the requirements perfectly, you must mark it as acceptable.
     - If the artifact is missing required data, breaks a constraint, or contains hallucinated information, you must reject it.

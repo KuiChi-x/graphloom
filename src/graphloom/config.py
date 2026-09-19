@@ -34,7 +34,7 @@ COMPACT_TRIGGER_RATIO: float = _env_float("GRAPHLOOM_COMPACT_TRIGGER_RATIO", 0.7
 # character budget for the summarizing LLM's action_results field.
 COMPACT_TARGET_RATIO: float = _env_float("GRAPHLOOM_COMPACT_TARGET_RATIO", 0.12)
 
-# How many trailing past_steps are kept verbatim (never compacted).
+# How many trailing turns are kept verbatim (never compacted).
 COMPACT_KEEP_RECENT_STEPS: int = _env_int("GRAPHLOOM_COMPACT_KEEP_RECENT", 5)
 
 # Anti-thrashing: hard cap on recursive compaction attempts per node call.
@@ -48,9 +48,6 @@ COMPACT_EMERGENCY_TRUNC_CHARS: int = _env_int("GRAPHLOOM_COMPACT_EMERGENCY_TRUNC
 # and a reasonable proxy for other providers exposed via an OpenAI API shim.
 COMPACT_TOKENIZER_ENCODING: str = os.environ.get("GRAPHLOOM_COMPACT_TOKENIZER", "cl100k_base")
 
-# Sentinel key inside past_steps[0] that signals the reducer to REPLACE the
-# channel instead of appending. See `add_past_steps` in state.py.
-COMPACT_SENTINEL_KEY: str = "__compact_replace__"
 
 # Concurrency ceiling for parallel subagent dispatch.
 SUBAGENT_MAX_CONCURRENCY = int(os.getenv("SUBAGENT_MAX_CONCURRENCY", "10"))

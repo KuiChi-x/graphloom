@@ -36,12 +36,12 @@ class WriteArtifactInput(StandardThoughtInput):
     artifact_name: str = Field(description="Relative file name. Name it after the business content, e.g. 'booking_hotel_list_blueprint.md', 'agoda_flight_search_crawler.py'. Avoid generic names like 'blueprint.md' or 'results.csv'.")
     content: str = Field(description=(
         "The artifact content to save. "
-        "Before composing this content, you MUST review two sources:\n"
-        "  1. <agent_history> — scan the Memory field of each step for accumulated structured data "
-        "(XPaths, API endpoints, request parameters, field mappings, code snippets).\n"
-        "  2. <agent_history> — check recent tool results for the latest raw data.\n"
+        "Before composing this content, you MUST review two sources in this conversation:\n"
+        "  1. Your own earlier messages — the working notes and structured data you "
+        "accumulated (XPaths, API endpoints, request parameters, field mappings, code snippets).\n"
+        "  2. Recent tool results — the latest raw data.\n"
         "Then compose the artifact by incorporating this evidence. "
-        "CRITICAL: All structured data MUST be copied EXACTLY as it appears in Memory or tool results. "
+        "CRITICAL: All structured data MUST be copied EXACTLY as it appears in your notes or tool results. "
         "NEVER abbreviate, truncate ancestor segments, or simplify. "
         "WRONG: '#login-btn'  RIGHT: 'div.header-nav > ul.menu-list > li:nth-of-type(3) > #login-btn'. "
         "WRONG: '/api/search'  RIGHT: 'https://www.example.com/api/v2/search?category=electronics&page=1'."
@@ -127,7 +127,7 @@ async def write_artifact(
     **kwargs,
 ) -> str:
     """Save data or analysis results as an artifact file. Use descriptive file names.
-    Before writing, review the Memory fields in <agent_history> and recent <tool_result_history> to collect all structured data (XPaths, URLs, API endpoints, parameters, code snippets). Copy them EXACTLY into the artifact — never truncate or simplify.
+    Before writing, review your earlier reasoning and tool results in this conversation to collect all structured data (XPaths, URLs, API endpoints, parameters, code snippets). Copy them EXACTLY into the artifact — never truncate or simplify.
     Set append=True to add content incrementally (e.g., collecting data across multiple pages)."""
     return await _write_artifact_impl(
         artifact_name=artifact_name,
@@ -375,22 +375,26 @@ async def deliver_artifact(artifact_paths: List[str], final_reply: str = "", **k
 
     delivery_status = session_store.get(session_id, "delivery_status", {}) or {}
 
-    # Auto-promote every runtime mount registered in this session
-    # (sandbox engine / dumped JS/WASM mounted for replay).
-    auto_added_paths: List[str] = []
-    seen = {os.path.abspath(p) for p in valid_paths}
-    for entry in delivery_status.values():
-        if "kind:runtime_mount" not in (entry.get("tags") or []):
-            continue
-        mount_abs = os.path.abspath(str(entry.get("path") or "").strip())
-        if not mount_abs or mount_abs in seen:
-            continue
-        if not os.path.exists(mount_abs):
-            continue
-        auto_added_paths.append(mount_abs)
-        seen.add(mount_abs)
+    # 暂时注释：曾在这里把本会话所有 `kind:runtime_mount` 自动提升进交付。
+    # 问题是 run_shell 每次调用都会注册一遍 runtime_files,"本会话挂载过"被当成
+    # 了"是交付物",于是一轮 65 步的调试把 12 个 probe 脚本和 2MB 原始 JS dump
+    # 一起递交（模型只点名了 7 个）。而且这些条目带 skip_audit,会绕过 find_fault
+    # 复核。模型自己列的清单已经包含真正的运行时依赖,不需要这层兜底。
+    #
+    # auto_added_paths: List[str] = []
+    # seen = {os.path.abspath(p) for p in valid_paths}
+    # for entry in delivery_status.values():
+    #     if "kind:runtime_mount" not in (entry.get("tags") or []):
+    #         continue
+    #     mount_abs = os.path.abspath(str(entry.get("path") or "").strip())
+    #     if not mount_abs or mount_abs in seen:
+    #         continue
+    #     if not os.path.exists(mount_abs):
+    #         continue
+    #     auto_added_paths.append(mount_abs)
+    #     seen.add(mount_abs)
 
-    delivered_paths = valid_paths + auto_added_paths
+    delivered_paths = valid_paths
 
     def _metadata_for(path: str) -> Dict[str, Any]:
         entry = delivery_status.get(os.path.basename(path)) or {}

@@ -1,37 +1,44 @@
-"""
-context_compaction_node.py
+"""compaction.py
 
-A LangGraph node inserted between `history` and the next turn. When the
-estimated context token usage crosses COMPACT_TRIGGER_RATIO, this node folds
-past_steps[:-KEEP_RECENT] into a single summary step (shape-compatible with
-the regular past_step dict) via a structured LLM call, and asks the reducer
-to REPLACE state["past_steps"] with [summary, *recent].
+A LangGraph node between `tool` and the next turn. When the estimated payload
+crosses COMPACT_TRIGGER_RATIO, the oldest turns are folded into one archival
+HumanMessage and the whole `messages` channel is replaced with
+`[request, summary, *recent_turns]`.
 
-The compacted step reuses the StandardThoughtInput schema
-(last_step_review / memory / next_action). The action_results field is
-deliberately left empty — the summary step is not a real action, and all
-durable facts are archived into `working_notes`.
+Folding happens on TURN boundaries (`message_utils.turns`), never inside one:
+a `tool_use` block separated from its `tool_result`, or a turn stripped of the
+thinking block whose signature the provider validates, is a malformed request.
+That is why the summary is a plain HumanMessage rather than a synthetic
+AIMessage — archived reasoning is described, not impersonated.
 """
 import logging
-import time
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from graphloom.config import (
     COMPACT_EMERGENCY_TRUNC_CHARS,
     COMPACT_KEEP_RECENT_STEPS,
     COMPACT_MAX_RETRY,
-    COMPACT_SENTINEL_KEY,
     COMPACT_TARGET_RATIO,
     COMPACT_TRIGGER_RATIO,
     MODEL_CONTEXT_WINDOW,
 )
 from graphloom.model.base_tool_input import StandardThoughtInput
 from graphloom.model.state import AgentState
+from graphloom.model.timeline import visible_args
 from graphloom.prompt.message_builder import build_llm_messages
 from graphloom.prompt.stack import PromptStack
+from graphloom.util.message_utils import text_of, turns
 from graphloom.util.token_counter import count_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -48,56 +55,33 @@ _FIELD_BUDGET_SHARE = {
 
 COMPACTION_SYSTEM_PROMPT = """You are a LOSSLESS ARCHIVER for a long-running agent.
 
-You are given the earliest past_steps of an agent run that must be folded
-into a single condensed past_step so the agent can keep working without
-losing the thread. The recent kept steps and todo.md are NOT shown to you
-because they are still kept verbatim downstream — do not try to repeat them.
+You are given the earliest turns of an agent run that must be folded into a
+single condensed archive so the agent can keep working without losing the
+thread. The recent kept turns and todo.md are NOT shown to you because they are
+still kept verbatim downstream — do not try to repeat them.
 
 CORE PRINCIPLE — LOSSLESS ARCHIVAL
 Your job is NOT to summarize loosely. Your job is to ARCHIVE every concrete
 fact the agent may still need. The following MUST be preserved verbatim
 (copy them out, do not paraphrase, do not merge, do not drop):
   * numbers, IDs, tokens, API keys, session IDs, hashes
-  * URLs, endpoints, file paths, artifact ids
-  * user's explicit instructions, clarifications, constraints, preferences
-  * decisions taken and the reasoning the user gave for them
-  * error messages, exception types, and how each was resolved
-  * data-schema hints: field names, enum values, parameter shapes
-  * named entities: product names, brand names, property names, person names
+  * URLs, endpoints, file paths, artifact paths
+  * selectors (XPath / CSS), parameter names, request/response field names
+  * credentials, cookies, headers that were needed
+  * exact error messages and the action that produced them
+  * decisions already made, and approaches already ruled out (with the reason)
 
-Things you MAY compress (but still keep pointers to):
-  * redundant intermediate reasoning that was superseded
-  * repeated failed attempts — keep the first failure + final outcome
-  * verbose tool payloads — keep the lesson/pointer, drop the raw dump
+FIELD BUDGETS (characters, approximate)
+  last_step_review: {eval_budget}
+  working_notes:    {working_notes_budget}
+  next_action:      {next_action_budget}
 
-OUTPUT SCHEMA (StandardThoughtInput)
-Produce exactly these three fields. A fourth field `action_results` exists
-in the schema but you MUST leave it as an empty string — this compacted step
-is not a real action, and flowing narrative belongs in `working_notes` instead.
-
-- last_step_review
-  AIM around {eval_budget} characters.
-  An overall stage assessment across ALL compacted steps: what worked,
-  what failed, what remains uncertain. Aggregate, do not enumerate.
-
-- working_notes
-  AIM around {working_notes_budget} characters. This is the primary archive.
-  Use a dense bulleted list. One concrete fact per bullet. Include
-  every item from the "preserved verbatim" list above that appeared in
-  the input. It is better to overshoot the aim than to drop facts.
-  Group bullets by topic (e.g. "APIs & keys", "URLs visited",
-  "User decisions", "Discovered constraints", "Errors & resolutions").
-
-- next_action
-  AIM around {next_action_budget} characters.
-  The immediate next goal implied by the compacted history. If the agent
-  was mid-step, state exactly where to resume (which URL, which tool,
-  which parameter).
-
-HARD RULES
-- Do not invent facts; only compress what is present in the input.
-- Do not duplicate content that obviously belongs in todo.md (pending tasks).
-- Write in the same language as the input steps.
+WRITING RULES
+- `last_step_review`: the run's trajectory so far and where it currently stands.
+- `working_notes`: the archive. Dense, structured, fact-first. This is where
+  every durable detail above must land.
+- `next_action`: the immediate next action implied by the turns you were given.
+- Write in the same language as the input turns.
 - If you are forced to choose between brevity and preserving a concrete
   fact, ALWAYS preserve the fact.
 """
@@ -120,16 +104,35 @@ def _field_budgets(total: int) -> Dict[str, int]:
     return {field: max(100, int(total * share)) for field, share in _FIELD_BUDGET_SHARE.items()}
 
 
-def _render_old_steps_for_summarizer(old_steps: List[Dict[str, Any]]) -> str:
+def _token_budget() -> int:
+    return int(MODEL_CONTEXT_WINDOW * COMPACT_TRIGGER_RATIO)
+
+
+def render_turns(groups: List[List[BaseMessage]]) -> str:
+    """Flatten turns to text for the summarizer. Reasoning is included: it is
+    where the agent recorded why it ruled things out."""
     lines: List[str] = []
-    for idx, step in enumerate(old_steps, start=1):
-        lines.append(f"<step index=\"{idx}\">")
-        lines.append(f"last_step_review: {step.get('last_step_review', '')}")
-        lines.append(f"working_notes: {step.get('working_notes', '')}")
-        lines.append(f"next_action: {step.get('next_action', '')}")
-        ar = str(step.get("action_results", ""))
-        lines.append(f"action_results: {ar}")
-        lines.append("</step>")
+    for index, group in enumerate(groups, start=1):
+        lines.append(f'<turn index="{index}">')
+        for message in group:
+            if isinstance(message, AIMessage):
+                for block in message.content_blocks:
+                    kind = block.get("type")
+                    if kind == "reasoning":
+                        lines.append(f"reasoning: {block.get('reasoning') or ''}")
+                    elif kind == "text":
+                        lines.append(f"said: {block.get('text') or ''}")
+                for call in message.tool_calls or []:
+                    lines.append(
+                        f"called {call.get('name')} with "
+                        f"{visible_args(call.get('args') or {})}"
+                    )
+            elif isinstance(message, ToolMessage):
+                marker = "error" if message.status == "error" else "result"
+                lines.append(f"{message.name} {marker}: {text_of(message)}")
+            else:
+                lines.append(f"user: {text_of(message)}")
+        lines.append("</turn>")
     return "\n".join(lines)
 
 
@@ -139,41 +142,23 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + " …[truncated]"
 
 
-def _enforce_field_budgets(step: Dict[str, Any], budgets: Dict[str, int]) -> Dict[str, Any]:
-    """Hard-cap each thought field to its budget. Acts as a safety net only;
-    the prompt is what drives the LLM to fill the fields."""
-    out = dict(step)
-    for field, limit in budgets.items():
-        val = str(out.get(field, "") or "")
-        if len(val) > limit:
-            out[field] = _truncate(val, limit)
-    return out
+def _archive_message(fields: Dict[str, Any], folded: int, budgets: Dict[str, int]) -> HumanMessage:
+    """The compacted turns, as one archival HumanMessage."""
+    capped = {
+        field: _truncate(str(fields.get(field) or ""), limit)
+        for field, limit in budgets.items()
+    }
+    return HumanMessage(content=(
+        f'<archived_history turns="{folded}">\n'
+        f"Trajectory so far: {capped['last_step_review']}\n\n"
+        f"Durable facts and decisions:\n{capped['working_notes']}\n\n"
+        f"Next action implied: {capped['next_action']}\n"
+        "</archived_history>"
+    ))
 
 
-def _apply_emergency_truncation(recent: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not recent:
-        return recent
-    # Find the single longest action_results and truncate it.
-    target_idx = max(
-        range(len(recent)),
-        key=lambda i: len(str(recent[i].get("action_results") or "")),
-    )
-    target = dict(recent[target_idx])
-    ar = str(target.get("action_results") or "")
-    if len(ar) > COMPACT_EMERGENCY_TRUNC_CHARS:
-        target["action_results"] = ar[:COMPACT_EMERGENCY_TRUNC_CHARS].rstrip() + " …[emergency-truncated]"
-        recent = list(recent)
-        recent[target_idx] = target
-        logger.warning(
-            "[compaction] emergency truncation applied to recent step index %d (was %d chars)",
-            target_idx,
-            len(ar),
-        )
-    return recent
-
-
-async def _summarize_old_steps(
-    old_steps: List[Dict[str, Any]],
+async def _summarize(
+    groups: List[List[BaseMessage]],
     budgets: Dict[str, int],
     llm: BaseChatModel,
 ) -> Dict[str, Any]:
@@ -182,115 +167,171 @@ async def _summarize_old_steps(
         llm.bind(max_tokens=_max_output_tokens())
         .with_structured_output(StandardThoughtInput, method="function_calling")
     )
-
     system = COMPACTION_SYSTEM_PROMPT.format(
         eval_budget=budgets["last_step_review"],
         working_notes_budget=budgets["working_notes"],
         next_action_budget=budgets["next_action"],
     )
-    user_payload = (
-        f"<compacted_step_count>{len(old_steps)}</compacted_step_count>\n"
-        f"<old_past_steps>\n{_render_old_steps_for_summarizer(old_steps)}\n</old_past_steps>"
+    result: StandardThoughtInput = await structured_llm.ainvoke([
+        SystemMessage(content=system),
+        HumanMessage(content=(
+            f"<folded_turn_count>{len(groups)}</folded_turn_count>\n"
+            f"<old_turns>\n{render_turns(groups)}\n</old_turns>"
+        )),
+    ])
+    return result.model_dump()
+
+
+def _emergency_truncate(groups: List[List[BaseMessage]]) -> List[List[BaseMessage]]:
+    """Last resort when retries are exhausted: shrink the single largest tool
+    result among the kept turns. Tool output is the only safely editable part —
+    reasoning blocks carry signatures and must stay byte-exact."""
+    candidates = [
+        (len(text_of(message)), group_index, message_index)
+        for group_index, group in enumerate(groups)
+        for message_index, message in enumerate(group)
+        if isinstance(message, ToolMessage)
+    ]
+    if not candidates:
+        return groups
+    size, group_index, message_index = max(candidates)
+    if size <= COMPACT_EMERGENCY_TRUNC_CHARS:
+        return groups
+    target = groups[group_index][message_index]
+    trimmed = target.model_copy(update={
+        "content": text_of(target)[:COMPACT_EMERGENCY_TRUNC_CHARS].rstrip()
+        + " …[emergency-truncated]"
+    })
+    logger.warning(
+        "[compaction] emergency truncation applied to %s result in turn %d (was %d chars)",
+        target.name, group_index + 1, size,
     )
-    messages = [SystemMessage(content=system), HumanMessage(content=user_payload)]
-
-    result: StandardThoughtInput = await structured_llm.ainvoke(messages)
-    step = result.model_dump()
-    # Compacted step is not a real action; keep action_results empty so the
-    # renderer can suppress it, and stamp the authoritative step count.
-    step["action_results"] = ""
-    step["compacted_step_count"] = len(old_steps)
-    return _enforce_field_budgets(step, budgets)
-
-
-def _token_budget() -> int:
-    return int(MODEL_CONTEXT_WINDOW * COMPACT_TRIGGER_RATIO)
+    groups = [list(group) for group in groups]
+    groups[group_index][message_index] = trimmed
+    return groups
 
 
 async def _estimate_state_tokens(state: AgentState, prompt_stack: PromptStack) -> int:
-    """Token count over the EXACT message payload ai_node will send to the LLM.
+    """Token count over the EXACT payload ai_node will send to the LLM.
 
     Going through `build_llm_messages` keeps the gate and the real request in
     lockstep — anything that doesn't reach the LLM won't be counted, and
     anything that will (system prompt, observer parts, attachments) is.
     """
-    messages = await build_llm_messages(state, prompt_stack)
-    return count_messages_tokens(messages)
+    return count_messages_tokens(await build_llm_messages(state, prompt_stack))
 
 
-async def _should_trigger(state: AgentState, past_steps: List[Dict[str, Any]], prompt_stack: PromptStack) -> bool:
-    if len(past_steps) <= COMPACT_KEEP_RECENT_STEPS:
-        return False
-    return await _estimate_state_tokens(state, prompt_stack) >= _token_budget()
+def _replace_channel(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """`add_messages` clears the channel on RemoveMessage(REMOVE_ALL_MESSAGES),
+    then appends what follows — an atomic swap in one update."""
+    return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
 
 
 def create_context_compaction_node(prompt_stack: PromptStack, llm: BaseChatModel):
     async def context_compaction_node(state: AgentState) -> Dict[str, Any]:
-        past_steps: List[Dict[str, Any]] = list(state.get("past_steps", []) or [])
-        if not await _should_trigger(state, past_steps, prompt_stack):
+        groups = turns(state.get("messages", []))
+        # groups[0] is the originating request; it is never folded away.
+        if len(groups) - 1 <= COMPACT_KEEP_RECENT_STEPS:
+            return {}
+        if await _estimate_state_tokens(state, prompt_stack) < _token_budget():
             return {}
 
-        total_budget = _total_char_budget()
-        budgets = _field_budgets(total_budget)
-        recent = past_steps[-COMPACT_KEEP_RECENT_STEPS:]
-        old = past_steps[:-COMPACT_KEEP_RECENT_STEPS]
+        opening, rest = groups[0], groups[1:]
+        recent = rest[-COMPACT_KEEP_RECENT_STEPS:]
+        old = rest[:-COMPACT_KEEP_RECENT_STEPS]
 
+        budgets = _field_budgets(_total_char_budget())
         logger.info(
-            "[compaction] triggered: %d past_steps, folding %d -> 1, keeping last %d (total_budget=%d chars)",
-            len(past_steps),
-            len(old),
-            len(recent),
-            total_budget,
+            "[compaction] triggered: %d turns, folding %d -> 1, keeping last %d",
+            len(rest), len(old), len(recent),
         )
 
-        attempt = 0
-        compacted_step: Dict[str, Any] = {}
-        current_agent_name = str(state.get("current_agent_name") or "main")
-        session_id = str(state.get("session_id") or "default")
-        compacted_step_id = f"{current_agent_name}:{session_id}:compacted:{int(time.time() * 1000)}"
-        while attempt < COMPACT_MAX_RETRY:
-            attempt += 1
+        archive = None
+        for attempt in range(1, COMPACT_MAX_RETRY + 1):
             try:
-                compacted_step = await _summarize_old_steps(old, budgets, llm)
+                fields = await _summarize(old, budgets, llm)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("[compaction] summarize failed on attempt %d: %s", attempt, exc)
-                # Fallback: synthesize a minimal step from raw fields so we
-                # still shrink the channel instead of leaving it unbounded.
-                fallback = {
+                # Fall back to the raw render so the channel still shrinks.
+                fields = {
                     "last_step_review": "Compaction fallback: summarizer failed.",
-                    "working_notes": _render_old_steps_for_summarizer(old),
-                    "next_action": old[-1].get("next_action", "") if old else "",
-                    "action_results": "",
-                    "compacted_step_count": len(old),
+                    "working_notes": render_turns(old),
+                    "next_action": "",
                 }
-                compacted_step = _enforce_field_budgets(fallback, budgets)
+            archive = _archive_message(fields, len(old), budgets)
 
-            compacted_step["step_id"] = compacted_step_id
-            compacted_step.setdefault("status", "compacted")
-
-            projected_state = dict(state)
-            projected_state["past_steps"] = [compacted_step, *recent]
-            post_tokens = await _estimate_state_tokens(projected_state, prompt_stack)
-
+            kept = [message for group in recent for message in group]
+            projected = {**state, "messages": [*opening, archive, *kept]}
+            post_tokens = await _estimate_state_tokens(projected, prompt_stack)
             if post_tokens < _token_budget():
-                sentinel = {COMPACT_SENTINEL_KEY: True}
-                return {"past_steps": [sentinel, compacted_step, *recent]}
+                return {"messages": _replace_channel(projected["messages"])}
 
             logger.warning(
                 "[compaction] attempt %d still over budget (%d / %d), tightening",
-                attempt,
-                post_tokens,
-                _token_budget(),
+                attempt, post_tokens, _token_budget(),
             )
-            # Tighten budgets for the next attempt (halve each field's cap).
             budgets = {field: max(100, limit // 2) for field, limit in budgets.items()}
 
-        # Exhausted retries — emergency degrade the kept window and emit anyway.
-        recent = _apply_emergency_truncation(recent)
-        sentinel = {COMPACT_SENTINEL_KEY: True}
+        # Exhausted retries — degrade the kept window and emit anyway.
+        recent = _emergency_truncate(recent)
+        logger.error("[compaction] max retries reached; emitting best-effort compaction")
+        kept = [message for group in recent for message in group]
+        return {"messages": _replace_channel([*opening, archive, *kept])}
+
+    return context_compaction_node
+
+
+def create_context_compaction_node(prompt_stack: PromptStack, llm: BaseChatModel):
+    async def context_compaction_node(state: AgentState) -> Dict[str, Any]:
+        groups = turns(state.get("messages", []))
+        # groups[0] is the originating request; it is never folded away.
+        if len(groups) - 1 <= COMPACT_KEEP_RECENT_STEPS:
+            return {}
+        if await _estimate_state_tokens(state, prompt_stack) < _token_budget():
+            return {}
+
+        opening, body = groups[0], groups[1:]
+        recent = body[-COMPACT_KEEP_RECENT_STEPS:]
+        old = body[:-COMPACT_KEEP_RECENT_STEPS]
+        budgets = _field_budgets(_total_char_budget())
+
+        logger.info(
+            "[compaction] triggered: %d turns, folding %d -> 1, keeping last %d",
+            len(body), len(old), len(recent),
+        )
+
+        archive = HumanMessage(content="")
+        for attempt in range(1, COMPACT_MAX_RETRY + 1):
+            try:
+                fields = await _summarize(old, budgets, llm)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[compaction] summarize failed on attempt %d: %s", attempt, exc)
+                # Fall back to the raw rendering so the channel still shrinks
+                # instead of growing unbounded.
+                fields = {
+                    "last_step_review": "Compaction fallback: summarizer failed.",
+                    "working_notes": render_turns(old),
+                    "next_action": "",
+                }
+
+            archive = _archive_message(fields, len(old), budgets)
+            kept = [*opening, archive, *[m for group in recent for m in group]]
+            post_tokens = await _estimate_state_tokens({**state, "messages": kept}, prompt_stack)
+            if post_tokens < _token_budget():
+                return {"messages": _replace_channel(kept)}
+
+            logger.warning(
+                "[compaction] attempt %d still over budget (%d / %d), tightening",
+                attempt, post_tokens, _token_budget(),
+            )
+            budgets = {field: max(100, limit // 2) for field, limit in budgets.items()}
+
+        recent = _emergency_truncate(recent)
         logger.error(
             "[compaction] max retries reached; emitting best-effort compaction with emergency truncation"
         )
-        return {"past_steps": [sentinel, compacted_step, *recent]}
+        return {"messages": _replace_channel(
+            [*opening, archive, *[m for group in recent for m in group]]
+        )}
 
     return context_compaction_node

@@ -1,46 +1,17 @@
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
-from graphloom.config import COMPACT_SENTINEL_KEY
 from graphloom.model.artifact_manifest import merge_artifact_manifest, replace_artifact_manifest
-
-
-def add_past_steps(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if left is None:
-        left = []
-    if right is None:
-        right = []
-    # Sentinel-aware replace: when the compaction node wants to swap the whole
-    # channel, it returns [{"__compact_replace__": True}, compacted, *recent].
-    # All other callers keep append semantics.
-    if right and isinstance(right[0], dict) and right[0].get(COMPACT_SENTINEL_KEY) is True:
-        return list(right[1:])
-
-    combined = list(left)
-    step_index = {
-        str(step.get("step_id")): idx
-        for idx, step in enumerate(combined)
-        if isinstance(step, dict) and step.get("step_id")
-    }
-    for step in right:
-        if isinstance(step, dict) and step.get("step_id"):
-            step_id = str(step.get("step_id"))
-            if step_id in step_index:
-                combined[step_index[step_id]] = step
-                continue
-            step_index[step_id] = len(combined)
-        combined.append(step)
-    return combined
+from graphloom.model.timeline import merge_turns
 
 
 def keep_max_step_counter(left: Any, right: Any) -> int:
     """Reducer for `step_counter`. Always keep the highest value seen so the
     counter is strictly monotonic across the graph — including across
-    compaction runs that shrink `past_steps`. Using a dedicated counter
-    (instead of `len(past_steps)`) is what prevents step_id collisions when
-    compaction folds earlier steps into a summary."""
+    compaction runs that shrink `messages`. Turn identity (used by the UI to
+    group think/tool chips) is keyed on this counter, never on list length."""
     try:
         left_int = int(left or 0)
     except (TypeError, ValueError):
@@ -52,35 +23,32 @@ def keep_max_step_counter(left: Any, right: Any) -> int:
     return max(left_int, right_int)
 
 
-_TOOL_HISTORY_MAX = 8
-
-
-def add_tool_results(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if left is None:
-        left = []
-    if right is None:
-        right = []
-    combined = left + right
-    return combined[-_TOOL_HISTORY_MAX:]
-
-
 def append_items(left: List[Any], right: List[Any]) -> List[Any]:
     return list(left or []) + list(right or [])
 
 
 class AgentState(TypedDict):
     current_agent_name: str
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    conversation: Annotated[Sequence[BaseMessage], add_messages]
-    events: Annotated[List[Dict[str, Any]], append_items]
-    input_query: str
-    attach_message_parts: Optional[List[Dict[str, Any]]]
-    session_id: Optional[str]
-    latest_ai_message: Optional[AIMessage]
 
-    past_steps: Annotated[List[Dict[str, Any]], add_past_steps]
+    # The single source of truth for what the LLM sees. Native LangChain
+    # messages only: HumanMessage / AIMessage (thinking + signature + tool
+    # calls intact) / ToolMessage. `add_messages` dedupes by id, so nodes
+    # return the messages they produced and the channel accumulates them.
+    # Compaction replaces the whole channel via RemoveMessage(REMOVE_ALL).
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+
+    # UI/persistence projection of `messages`, written once per turn at plan
+    # time and updated in place on completion. Never sent to the LLM — it
+    # exists because wall-clock timestamps and step ids are not recoverable
+    # from messages alone.
+    timeline: Annotated[List[Dict[str, Any]], merge_turns]
     step_counter: Annotated[int, keep_max_step_counter]
-    tool_result_history: List[Dict[str, Any]]
+
+    events: Annotated[List[Dict[str, Any]], append_items]
+    session_id: Optional[str]
+
+    # Per-turn volatile tail, rebuilt by the observer every turn and appended
+    # after the stable message prefix so the cache prefix stays byte-stable.
     observer_message_parts: Optional[List[HumanMessage]]
 
     input_artifact_manifest: Annotated[List[Dict[str, Any]], replace_artifact_manifest]

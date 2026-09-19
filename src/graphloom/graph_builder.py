@@ -1,7 +1,7 @@
 """graph_builder.py — the generic agent-loop factory.
 
 `build_agent_graph` assembles a standard ReAct-style loop:
-    observer? → ai → tool → route → history → compaction → ai  (+ finish)
+    observer? → ai → tool → route → compaction → ai  (+ finish)
 
 Everything transport- or business-specific (HITL, subagent dispatch, artifact
 delivery over a wire) is a tool the caller supplies; the framework wires only
@@ -17,7 +17,6 @@ from graphloom.model.subagents import SubAgentSpec
 from graphloom.nodes.ai import create_ai_node
 from graphloom.nodes.compaction import create_context_compaction_node
 from graphloom.nodes.finish import create_finish_node
-from graphloom.nodes.history import create_history_node
 from graphloom.nodes.start import create_start_node
 from graphloom.nodes.tool import create_tool_node
 from graphloom.prompt.stack import create_prompt_stack
@@ -96,7 +95,6 @@ def build_agent_graph(
         workflow.add_node("custom_find_fault", custom_find_fault)
     if find_fault_node:
         workflow.add_node("find_fault", find_fault_node)
-    workflow.add_node("history", create_history_node())
     workflow.add_node("compaction", create_context_compaction_node(prompt_stack, llm))
     workflow.add_node("finish", create_finish_node())
 
@@ -120,23 +118,23 @@ def build_agent_graph(
             if find_fault_node:
                 return "find_fault"
             return "finish"
-        return "history"
+        return "compaction"
 
     def route_after_custom_find_fault(state: AgentState) -> str:
         if list(state.get("current_delivery_manifest", []) or []):
             if find_fault_node:
                 return "find_fault"
             return "finish"
-        return "history"
+        return "compaction"
 
     def route_after_find_fault(state: AgentState) -> str:
         if list(state.get("current_delivery_manifest", []) or []):
             return "finish"
-        return "history"
+        return "compaction"
 
     workflow.add_edge("ai", "tool")
 
-    tool_targets = {"history": "history", "finish": "finish"}
+    tool_targets = {"compaction": "compaction", "finish": "finish"}
     if custom_find_fault:
         tool_targets["custom_find_fault"] = "custom_find_fault"
     if find_fault_node:
@@ -144,15 +142,14 @@ def build_agent_graph(
     workflow.add_conditional_edges("tool", route_after_tool, tool_targets)
 
     if custom_find_fault:
-        custom_targets = {"history": "history", "finish": "finish"}
+        custom_targets = {"compaction": "compaction", "finish": "finish"}
         if find_fault_node:
             custom_targets["find_fault"] = "find_fault"
         workflow.add_conditional_edges("custom_find_fault", route_after_custom_find_fault, custom_targets)
 
     if find_fault_node:
-        workflow.add_conditional_edges("find_fault", route_after_find_fault, {"history": "history", "finish": "finish"})
+        workflow.add_conditional_edges("find_fault", route_after_find_fault, {"compaction": "compaction", "finish": "finish"})
 
-    workflow.add_edge("history", "compaction")
     workflow.add_edge("compaction", "observer" if observer else "ai")
     workflow.add_edge("finish", END)
 

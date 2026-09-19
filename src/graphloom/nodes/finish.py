@@ -5,6 +5,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage
 
 from graphloom.model.state import AgentState
+from graphloom.util.message_utils import get_last_ai_message, text_of
 
 
 def create_finish_node():
@@ -21,7 +22,12 @@ def create_finish_node():
         final_reply = str(state.get("final_reply") or "").strip()
         if final_reply:
             assistant_id = f"assistant-{uuid4().hex}"
-            updates["conversation"] = [AIMessage(id=assistant_id, content=final_reply)]
+            # On the direct-reply path the model's own AIMessage already carries
+            # this text, so appending it again would duplicate the turn. Only a
+            # reply delivered through a tool argument still needs to be written
+            # into the channel, so a follow-up turn sees how the run ended.
+            if text_of(get_last_ai_message(state.get("messages"))) != final_reply:
+                updates["messages"] = [AIMessage(id=assistant_id, content=final_reply)]
             updates["events"] = [{
                 "id": assistant_id,
                 "type": "message",

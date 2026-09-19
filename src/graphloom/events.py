@@ -34,7 +34,7 @@ Inject::
 
     graph = build_agent_graph(...)
     await graph.ainvoke(
-        {"input_query": "..."},
+        {"messages": [HumanMessage(content="...")]},
         config={"configurable": {"event_emitter": MyEmitter()}},
     )
 """

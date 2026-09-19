@@ -1,18 +1,21 @@
 import json
+import os
+import platform
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 
 from graphloom.model.state import AgentState
 from graphloom.util.model_info import (
     is_real_anthropic_model,
     supports_explicit_cache_breakpoints,
 )
+from graphloom.util.message_utils import turns
 from graphloom.util.session_store import session_store
 
 
-def _provider(llm: BaseChatModel | None) -> str:
+def provider_dialect(llm: BaseChatModel | None) -> str:
     """该模型说哪种缓存断点方言，判不出来返回 ""。
 
     判的是**模型**而不是客户端库：网关会把百炼 qwen / kimi / glm 挂在 Anthropic
@@ -25,106 +28,127 @@ def _provider(llm: BaseChatModel | None) -> str:
     return ""
 
 
-def _cache_marker(llm: BaseChatModel | None) -> Dict[str, Any]:
-    provider = _provider(llm)
-    if provider == "anthropic":
+def cache_marker(llm: BaseChatModel | None) -> Dict[str, Any]:
+    dialect = provider_dialect(llm)
+    if dialect == "anthropic":
         return {"cache_control": {"type": "ephemeral"}}
-    if provider == "openai":
+    if dialect == "openai":
         return {"prompt_cache_breakpoint": {"mode": "explicit"}}
     return {}
 
 
-def _cache_block(text: str, llm: BaseChatModel | None = None) -> Dict[str, Any]:
-    return {"type": "text", "text": text, **_cache_marker(llm)}
+def cache_block(text: str, llm: BaseChatModel | None = None) -> Dict[str, Any]:
+    return {"type": "text", "text": text, **cache_marker(llm)}
 
 
 # OpenAI 读取时最多考虑 50 个断点，超过就接不上。留一个给 system。
 _OPENAI_MAX_BREAKPOINTS = 49
 
 
-def _history_breakpoints(step_count: int, provider: str) -> set:
-    """哪些步骤要打缓存断点。两家的写入名额都是每请求 4 个，但读取规则完全不同,
+def _history_breakpoints(turn_count: int, dialect: str) -> set:
+    """哪些轮次要打缓存断点。两家的写入名额都是每请求 4 个，但读取规则完全不同,
     所以位置策略也不同。
 
     - Anthropic: 回溯窗口是 20 个块 —— 从断点往前最多查 20 个位置，找不到就停。
-      所以钉最新两步：一个写在增长边缘，另一个留在上轮写入处兜底，间距永远是 1,
+      所以钉最新两轮：一个写在增长边缘，另一个留在上轮写入处兜底，间距永远是 1,
       不可能超窗。实测 46% -> 88%。
     - OpenAI /responses: 没有块距限制，但读取只看最近 50 个断点。写入名额虽然是
-      4 个，已写入的旧断点不重写也照样能读，所以断点集合应该只增不减 —— 每步都
-      钉，实测 40 步 95%（单调爬到 97%，无锯齿）。
+      4 个，已写入的旧断点不重写也照样能读，所以断点集合应该只增不减 —— 每轮都
+      钉，实测 40 轮 95%（单调爬到 97%，无锯齿）。
       反过来，删掉任何一个旧断点都会让整条链作废且再也接不回来：之前只留 3 个
-      断点时每次换锚点那轮就掉到 3%，40 步总命中 69%；到 50 上限后开始丢最老的
-      断点，第 51 步起永久锁死在 1%。
+      断点时每次换锚点那轮就掉到 3%，40 轮总命中 69%；到 50 上限后开始丢最老的
+      断点，第 51 轮起永久锁死在 1%。
+
+    轮次口径从 past_steps 换成了原生消息的 turn 分组（见 message_utils.turns）,
+    位置策略不变：断点永远落在某一轮的最后一个块上，也就是该轮的 tool_result
+    结尾处 —— 那里是历史的稳定前缀边界。
     """
-    if step_count <= 0:
+    if turn_count <= 0:
         return set()
-    if provider == "anthropic":
-        return {i for i in (step_count - 2, step_count - 1) if i >= 0}
-    if provider == "openai":
-        # 每步一个断点，逼近 50 上限时步长翻倍。翻倍那一轮会掉一次（~4%）,
-        # 下一轮就回到 98%；200 步的会话里只发生 3 次（第 50、99、197 步）。
+    if dialect == "anthropic":
+        return {i for i in (turn_count - 2, turn_count - 1) if i >= 0}
+    if dialect == "openai":
+        # 每轮一个断点，逼近 50 上限时步长翻倍。翻倍那一轮会掉一次（~4%）,
+        # 下一轮就回到 98%；200 轮的会话里只发生 3 次（第 50、99、197 轮）。
         # 步长必须只增不减，否则旧断点被丢弃，缓存链断掉且无法恢复。
         stride = 1
-        while (step_count + stride - 1) // stride > _OPENAI_MAX_BREAKPOINTS - 1:
+        while (turn_count + stride - 1) // stride > _OPENAI_MAX_BREAKPOINTS - 1:
             stride *= 2
-        return {0} | {i for i in range(stride - 1, step_count, stride)}
+        return {0} | {i for i in range(stride - 1, turn_count, stride)}
     return set()
 
 
-def build_past_steps_message(
-    past_steps: List[Dict[str, Any]],
+def _mark_last_block(message: BaseMessage, marker: Dict[str, Any]) -> BaseMessage:
+    """Copy `message` with `marker` on its final content block.
+
+    Never mutates the input: these messages live in the checkpointed channel,
+    and a marker written into them would be persisted and replayed forever.
+
+    A ToolMessage's string content is promoted to a one-element block list,
+    which the Anthropic adapter hoists onto the `tool_result` block itself.
+    An AIMessage is marked on its last text block; a turn whose AIMessage has
+    no text block (pure tool call) is skipped rather than marked on `thinking`,
+    which must stay byte-identical to what the provider signed.
+    """
+    content = message.content
+    blocks: List[Dict[str, Any]]
+    if isinstance(content, str):
+        if not content.strip():
+            return message
+        blocks = [{"type": "text", "text": content}]
+    else:
+        blocks = [
+            dict(block) if isinstance(block, dict) else {"type": "text", "text": str(block)}
+            for block in content or []
+        ]
+    if not blocks:
+        return message
+
+    target = None
+    if isinstance(message, ToolMessage):
+        target = len(blocks) - 1
+    else:
+        for index in range(len(blocks) - 1, -1, -1):
+            if blocks[index].get("type") == "text":
+                target = index
+                break
+    if target is None:
+        return message
+
+    blocks[target] = {**blocks[target], **marker}
+    return message.model_copy(update={"content": blocks})
+
+
+def apply_history_breakpoints(
+    messages: List[BaseMessage],
     llm: BaseChatModel | None = None,
-) -> HumanMessage:
-    if not past_steps:
-        return HumanMessage(
-            content=[_cache_block(
-                "<agent_history>\n    New task, no operation history yet.\n</agent_history>",
-                llm,
-            )]
-        )
+) -> List[BaseMessage]:
+    """Place cache breakpoints on turn boundaries in the native history.
 
-    blocks = ["<agent_history>"]
-    for idx, step in enumerate(past_steps):
-        step_lines: List[str] = []
-        repeat_count = step.get("repeatCount", 1)
-        repeat_info = (
-            f" [WARNING: This action has been repeated {repeat_count} times consecutively]"
-            if repeat_count > 1 else ""
-        )
-        compacted_count = int(step.get("compacted_step_count") or 0)
-        summary_prefix = (
-            f" [SUMMARY of {compacted_count} prior steps]" if compacted_count > 0 else ""
-        )
-        last_step_review = str(step.get("last_step_review") or "").strip()
-        working_notes = str(step.get("working_notes") or "").strip()
-        next_action = str(step.get("next_action") or "").strip()
-        action_results = str(step.get("action_results") or "").strip()
-        status = str(step.get("status") or "completed").strip()
+    The system prompt carries its own breakpoint; this pins the *growing* part
+    of the prefix, which is where the win is — without it only the static
+    system block is cached and every replayed turn is re-read at full price.
+    """
+    marker = cache_marker(llm)
+    if not marker:
+        return messages
 
-        step_lines.append(f"<step_{idx + 1}>{summary_prefix}")
-        if status and status != "completed":
-            step_lines.append(f"Status: {status}")
-        step_lines.append(f"Last Step Review: {last_step_review}")
-        step_lines.append(f"Notes: {working_notes}")
-        step_lines.append(f"Next Action: {next_action}{repeat_info}")
+    groups = turns(messages)
+    if not groups:
+        return messages
 
-        # Compacted summary steps carry no real action_results; skip the
-        # empty line so the archival block stays clean.
-        if compacted_count <= 0:
-            if status and status != "completed" and not action_results:
-                action_results = "Tool execution did not finish yet; this step may have been interrupted."
-            step_lines.append(f"Action Results: {action_results}")
-        step_lines.append(f"</step_{idx + 1}>")
-        blocks.append("\n".join(step_lines))
+    # Map each turn to the index of its last message in the flat list.
+    boundaries: List[int] = []
+    position = 0
+    for group in groups:
+        position += len(group)
+        boundaries.append(position - 1)
 
-    content = [{"type": "text", "text": block} for block in blocks]
-    # blocks[0] is the "<agent_history>" opener, so step N sits at content[N].
-    marker = _cache_marker(llm)
-    if marker:
-        for step_idx in _history_breakpoints(len(past_steps), _provider(llm)):
-            content[step_idx + 1].update(marker)
-    content.append({"type": "text", "text": "</agent_history>"})
-    return HumanMessage(content=content)
+    marked = list(messages)
+    for turn_index in _history_breakpoints(len(groups), provider_dialect(llm)):
+        flat_index = boundaries[turn_index]
+        marked[flat_index] = _mark_last_block(marked[flat_index], marker)
+    return marked
 
 
 def _json_block(tag: str, value: Any) -> str:
@@ -141,10 +165,10 @@ def render_delivery_status(session_id: str) -> str:
         status = entry.get("status", "UNKNOWN")
         path = entry.get("path", "")
         summary = entry.get("summary", "")
-        fatal_gaps = entry.get("fatal_gaps", [])
-        recommended_rework = entry.get("recommended_rework", [])
+        fatal_gaps = entry.get("fatal_gaps") or []
+        recommended_rework = entry.get("recommended_rework") or []
 
-        if (fatal_gaps or recommended_rework) and status == "REJECTED":
+        if fatal_gaps or recommended_rework:
             lines.append(f'<artifact path="{path}" status="{status}" summary="{summary}">')
             if fatal_gaps:
                 lines.append("<fatal_gaps>")
@@ -172,14 +196,41 @@ def render_todo_contents(todo_contents: str) -> str:
     return f"<todo_contents>\n{content}\n</todo_contents>"
 
 
-def build_user_request_str(state: AgentState) -> str:
-    return f"<user_request>\n{state.get('input_query', '')}\n</user_request>"
+
+def render_environment(current_time: str = "") -> str:
+    """Host facts the agent needs before it writes a shell command or a path.
+
+    Without the OS the model guesses, and on Windows it reliably guesses wrong:
+    `ls`/`rm -rf` instead of PowerShell, forward slashes, `/tmp` paths. The
+    shell name is included because "Windows" alone still leaves cmd vs
+    PowerShell vs the Git-Bash case ambiguous.
+    """
+    lines = []
+    if current_time:
+        lines.append(f"Current time: {current_time}")
+    lines.extend([
+        f"OS: {platform.system()} {platform.release()} ({platform.machine()})",
+        # f"Default shell: {_default_shell()}",
+        # f"Path separator: {os.sep!r}",
+        # f"Working directory: {os.getcwd()}",
+        # f"Python: {platform.python_version()}",
+    ])
+    return "<environment>\n" + "\n".join(lines) + "\n</environment>"
+
+
+def _default_shell() -> str:
+    if platform.system() == "Windows":
+        comspec = os.environ.get("COMSPEC", "")
+        if os.environ.get("MSYSTEM") or "bash" in os.environ.get("SHELL", "").lower():
+            return "bash (Git Bash / MSYS)"
+        return "powershell" if "powershell" in comspec.lower() else "cmd.exe"
+    return os.environ.get("SHELL") or "sh"
 
 
 def build_prompt_context(state: AgentState, current_time: str = "", todo_contents: str = "") -> str:
     session_id = str(state.get("session_id") or "default")
     sections = [
-        f"<environment>\nCurrent time: {current_time}\n</environment>" if current_time else "",
+        render_environment(current_time),
         render_todo_contents(todo_contents),
         render_delivery_status(session_id),
         _json_block("input_artifact_manifest", list(state.get("input_artifact_manifest", []) or [])),

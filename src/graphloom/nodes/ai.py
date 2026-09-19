@@ -15,17 +15,11 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from graphloom.events import emit_step
 from graphloom.model.state import AgentState
-from graphloom.nodes.history import _filter_thought_args
+from graphloom.model.timeline import build_turn, step_id_for
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
 from graphloom.prompt.message_builder import build_llm_messages
 from graphloom.prompt.stack import PromptStack
 from graphloom.util.model_info import provider_of, supports_explicit_cache_breakpoints
-
-
-def _planned_step_id(state: AgentState, counter: int) -> str:
-    current_agent_name = str(state.get("current_agent_name") or "main")
-    session_id = str(state.get("session_id") or "default")
-    return f"{current_agent_name}:{session_id}:step:{counter}"
 
 
 def _chunk_parts(message: Any) -> tuple[str, str]:
@@ -38,54 +32,6 @@ def _chunk_parts(message: Any) -> tuple[str, str]:
         elif block.get("type") == "reasoning":
             reasoning.append(str(block.get("reasoning") or ""))
     return "".join(text), "".join(reasoning)
-
-
-def _build_pending_step(
-    state: AgentState,
-    tool_calls: List[Dict[str, Any]],
-    counter: int,
-    *,
-    think: str = "",
-    content: str = "",
-) -> Dict[str, Any]:
-    last_step_review = ""
-    working_notes = ""
-    next_action = ""
-    tool_calls_data: List[Dict[str, Any]] = []
-    action_lines: List[str] = []
-
-    for tool_call in tool_calls:
-        raw_args = dict(tool_call.get("args") or {})
-        last_step_review = str(raw_args.get("last_step_review") or last_step_review).strip()
-        working_notes = str(raw_args.get("working_notes") or working_notes).strip()
-        next_action = str(raw_args.get("next_action") or next_action).strip()
-        tool_name = str(tool_call.get("name") or "")
-        filtered_args = _filter_thought_args(raw_args)
-        tool_calls_data.append({
-            "call_id": str(tool_call.get("id") or ""),
-            "tool_name": tool_name,
-            "tool_args": filtered_args,
-            "result": "",
-            "has_error": False,
-        })
-        action_lines.append(
-            f"Planned tool {tool_name} with args:{filtered_args}; result pending."
-        )
-
-    return {
-        "step_id": _planned_step_id(state, counter),
-        "status": "pending_tool",
-        "last_step_review": last_step_review,
-        "working_notes": working_notes,
-        "next_action": next_action,
-        # think(reasoning 全文)与 content(LLM 正文全文)持久化进 step,
-        # 刷新后前端可从 past_steps 还原,不再依赖一次性的实时 token 流。
-        "think": think,
-        "content": content,
-        "action_results": "\n".join(action_lines),
-        "tool_calls": tool_calls_data,
-        "timestamp": int(time.time() * 1000),
-    }
 
 
 @retry(
@@ -109,7 +55,7 @@ async def _astream_with_retry(
     """流式调用 LLM,合并出完整 AIMessage 返回。
 
     返回 (merged_ai_message, reasoning_total):merged 含 content 全文,
-    reasoning_total 是累计的 think 全文,供上层持久化进 past_steps(刷新后可还原)。
+    reasoning_total 是累计的 think 全文,供上层持久化进 timeline(刷新后可还原)。
 
     Each chunk is also published via event_emitter (if injected) as an
     "ai_delta" event so the host can stream token/reasoning to its UI in
@@ -203,35 +149,39 @@ def create_ai_node(
             session_id=session_id,
             step_index=step_index,
         )
-        updates: Dict[str, object] = {"latest_ai_message": response}
-        tool_calls = list(getattr(response, "tool_calls", []) or [])
-        if tool_calls:
-            next_counter = int(state.get("step_counter") or 0) + 1
-            content_text, _ = _chunk_parts(response)
-            pending_step = _build_pending_step(
-                state, tool_calls, next_counter,
-                think=reasoning_text, content=content_text,
-            )
-            updates["past_steps"] = [pending_step]
-            updates["step_counter"] = next_counter
-            # Publish a step_planned event so observers (host WS bridge) can show
-            # the step title + think before the tool chip lands. Framework stays
-            # decoupled — emit_step is a no-op when no emitter was injected.
-            await emit_step(config, "step_planned", {
-                "step_id": pending_step["step_id"],
-                "step_index": next_counter,
-                "agent_name": agent_name,
-                "session_id": session_id,
-                "last_step_review": pending_step["last_step_review"],
-                "working_notes": pending_step["working_notes"],
-                "next_action": pending_step["next_action"],
-                "think": reasoning_text,
-                "content": content_text,
-                "tool_calls": [
-                    {"tool_name": tc["tool_name"], "tool_args": tc["tool_args"]}
-                    for tc in pending_step["tool_calls"]
-                ],
-            })
+        # The merged AIMessage carries thinking + signature + tool_calls
+        # verbatim; handing it straight to the channel is what lets the model
+        # read its own prior reasoning next turn instead of re-deriving it.
+        updates: Dict[str, object] = {"messages": [response]}
+        if not response.tool_calls:
+            return updates
+
+        next_counter = int(state.get("step_counter") or 0) + 1
+        turn = build_turn(
+            step_id=step_id_for(agent_name, session_id, next_counter),
+            ai_message=response,
+            status="pending_tool",
+        )
+        updates["timeline"] = [turn]
+        updates["step_counter"] = next_counter
+        # Publish step_planned so observers (host WS bridge) can show the step
+        # title + think before the tool chip lands. Framework stays decoupled —
+        # emit_step is a no-op when no emitter was injected.
+        await emit_step(config, "step_planned", {
+            "step_id": turn["step_id"],
+            "step_index": next_counter,
+            "agent_name": agent_name,
+            "session_id": session_id,
+            "last_step_review": turn["last_step_review"],
+            "working_notes": turn["working_notes"],
+            "next_action": turn["next_action"],
+            "think": turn["think"],
+            "content": turn["content"],
+            "tool_calls": [
+                {"tool_name": call["tool_name"], "tool_args": call["tool_args"]}
+                for call in turn["tool_calls"]
+            ],
+        })
         return updates
 
     return ai_node

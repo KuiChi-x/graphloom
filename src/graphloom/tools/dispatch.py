@@ -30,6 +30,7 @@ from graphloom.events import emit_step
 from graphloom.model.artifact_manifest import merge_artifact_manifest
 from graphloom.model.base_tool_input import PlannerThoughtInput
 from graphloom.model.subagents import SubAgentRunContext, SubAgentSpec
+from graphloom.util.message_utils import get_last_ai_message, text_of
 
 
 def render_available_subagents(subagents: List[SubAgentSpec]) -> str:
@@ -91,13 +92,13 @@ class SubAgentTask(BaseModel):
     )
     title: str = Field(default="", description="Short internal task label.")
     agent_name: str = Field(description="Target subagent name.")
-    instruction: str = Field(description="Self-contained instruction for the sub-agent. Include the concrete goal, what evidence to gather or produce, and what outcome should be delivered.")
-    data_requirements: str = Field(default="", description="Specific data fields or entities to extract, if applicable.")
-    constraints: str = Field(default="", description="Rules, limitations, or specific conditions to follow.")
+    instruction: str = Field(description="The objective and boundaries of this task, in the requester's own terms: what must be accomplished, against which target, under which of their stated conditions. Not how to do it and not what the deliverable should contain internally — the sub-agent's own system prompt owns its method and its output contract.")
+    data_requirements: str = Field(default="", description="Data fields or entities the requester explicitly named. Leave empty when they named none; do not infer a field list.")
+    constraints: str = Field(default="", description="Hard limits that came from the requester or from an upstream artifact. Leave empty when there are none; do not restate generic engineering rules the sub-agent already follows.")
     target_sites: List[str] = Field(default_factory=list, description="Sites or URLs this step is focused on. Keep this aligned with the user's visible targets whenever possible.")
     group_id: int = Field(default=0, description="Parallel group ID. Same group_id means steps may run in parallel; larger group_id means later dependent phases.")
     dependencies: List[int] = Field(default_factory=list, description="List of task_ids that must complete before this task can start.")
-    expected_output: str = Field(default="", description="Clear description of the expected output or artifact from this task.")
+    expected_output: str = Field(default="", description="What kind of thing this task must hand over (e.g. a crawler script, an API blueprint) — never its internal format or sections. Leave empty when the sub-agent's own contract already defines its deliverable.")
     consumed_artifact_paths: List[str] = Field(
         default_factory=list,
         description="Absolute paths of upstream artifacts this task should consume. Leave empty to receive all upstream artifacts.",
@@ -173,10 +174,10 @@ def _build_sub_state(
         _render_input_manifest(input_artifact_manifest),
     ]
 
-    bootstrap_message = HumanMessage(content="\n\n".join(blocks))
+    # The bootstrap HumanMessage IS the child's request: the rendered step
+    # request is embedded in it, so the child needs no separate request field.
     return {
-        "messages": [bootstrap_message],
-        "input_query": step_request,
+        "messages": [HumanMessage(content="\n\n".join(blocks))],
         "session_id": child_session_id,
         "current_agent_name": spec.agent_name,
         "input_artifact_manifest": input_artifact_manifest,
@@ -185,23 +186,13 @@ def _build_sub_state(
 
 
 def _extract_final_reply(result: Any) -> str:
+    """The child's answer: its explicit final_reply, else its last AI turn."""
     if not isinstance(result, dict):
         return ""
     text = str(result.get("final_reply") or "").strip()
     if text:
         return text
-    latest_ai = result.get("latest_ai_message")
-    if latest_ai is None:
-        return ""
-    content = getattr(latest_ai, "content", "")
-    if isinstance(content, list):
-        text = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    else:
-        text = str(content or "").strip()
-    return text
+    return text_of(get_last_ai_message(result.get("messages")))
 
 
 async def _run_cleanup_hook(spec: SubAgentSpec, run_context: SubAgentRunContext) -> None:

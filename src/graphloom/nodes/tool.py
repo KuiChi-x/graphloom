@@ -2,15 +2,21 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp
 
 from graphloom.events import emit_step
 from graphloom.model.state import AgentState
-from graphloom.nodes.history import THOUGHT_FIELDS, _filter_thought_args
+from graphloom.model.timeline import (
+    THOUGHT_FIELDS,
+    build_turn,
+    step_id_for,
+    turn_index_of,
+    visible_args,
+)
 from graphloom.nodes.interrupt_guard import raise_if_cancelled
-from graphloom.util.message_utils import get_last_ai_message
+from graphloom.util.message_utils import get_last_ai_message, text_of
 
 # 工具在返回值首行放这个标记自报成败。没有标记就算成功 —— 真正的失败走下面的
 # except 分支或 report_outcome，不靠猜。
@@ -39,53 +45,15 @@ def _resolve_error(text: str) -> tuple[str, bool]:
     return rest, marker[len(_OUTCOME_PREFIX):].strip() == "error"
 
 
-def _make_tool_history_entry(
-        step: int,
-        tool_name: str,
-        tool_args: Dict[str, Any],
-        result: str,
-        has_error: bool,
-        call_id: str = "",
-) -> Dict[str, Any]:
-    return {
-        "step": step,
-        "call_id": call_id,
-        "tool_name": tool_name,
-        "tool_args": tool_args,
-        "result": result,
-        "has_error": has_error,
-    }
-
-
 def _current_step_id(state: AgentState) -> str:
-    for step in reversed(list(state.get("past_steps", []) or [])):
-        if isinstance(step, dict) and step.get("status") == "pending_tool" and step.get("step_id"):
-            return str(step.get("step_id"))
-    current_agent_name = str(state.get("current_agent_name") or "main")
-    session_id = str(state.get("session_id") or "default")
-    return f"{current_agent_name}:{session_id}:step:{max(0, len(state.get('past_steps', []) or []) - 1)}"
-
-
-def _current_step_number(state: AgentState) -> int:
-    past_steps = list(state.get("past_steps", []) or [])
-    for index in range(len(past_steps) - 1, -1, -1):
-        step = past_steps[index]
-        if isinstance(step, dict) and step.get("status") == "pending_tool":
-            return index
-    return len(past_steps)
-
-
-def _turn_index_from_step_id(step_id: str) -> int:
-    """The UI-facing turn index = the 1-based counter encoded in the step_id
-    (``agent:session:step:{counter}``). ai_node / history_node emit that same
-    counter as ``step_index``; tool events MUST match it so a step's think,
-    tool chips, and result all land in one turn block. Do not use the internal
-    past_steps ordinal here — it is 0-based and drifts after compaction."""
-    tail = str(step_id or "").rsplit(":step:", 1)[-1]
-    try:
-        return int(tail)
-    except (TypeError, ValueError):
-        return 0
+    """This turn's step id. `step_counter` is monotonic and survives
+    compaction, so the id stays stable for the whole turn — ai_node already
+    bumped it when it planned the tool calls."""
+    return step_id_for(
+        str(state.get("current_agent_name") or "main"),
+        str(state.get("session_id") or "default"),
+        int(state.get("step_counter") or 0),
+    )
 
 
 def _build_runtime_context(
@@ -119,7 +87,6 @@ def _inject_hidden_args(
     for field in THOUGHT_FIELDS - {"session_id", "runtime_context"}:
         args.setdefault(field, "")
     if tool_name == "dispatch_subagents":
-        args.setdefault("input_query", state.get("input_query", ""))
         args.setdefault("input_artifact_manifest", list(state.get("input_artifact_manifest", []) or []))
         args.setdefault("approved_artifact_manifest", list(state.get("approved_artifact_manifest", []) or []))
     elif tool_name == "deliver_artifact":
@@ -145,6 +112,31 @@ def _stringify_tool_result(result: Any) -> str:
     return text
 
 
+async def _emit_step_done(
+        config: RunnableConfig,
+        *,
+        step_id: str,
+        turn_index: int,
+        agent_name: str,
+        session_id: str,
+        turn: Dict[str, Any],
+) -> None:
+    """Close out the UI turn block. No-op without an emitter."""
+    await emit_step(config, "step_done", {
+        "step_id": step_id,
+        "step_index": turn_index,
+        "agent_name": agent_name,
+        "session_id": session_id,
+        **{
+            key: turn.get(key)
+            for key in (
+                "last_step_review", "working_notes", "next_action",
+                "think", "content", "tool_calls", "completed_timestamp",
+            )
+        },
+    })
+
+
 def _merge_state_patch(target: Dict[str, Any], patch: Dict[str, Any]) -> None:
     if not patch:
         return
@@ -162,31 +154,23 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
 
     async def tool_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         raise_if_cancelled(config)
-        last_ai_message = state.get("latest_ai_message") or get_last_ai_message(list(state.get("messages", []) or []))
+        messages = list(state.get("messages", []) or [])
+        last_ai_message = get_last_ai_message(messages)
         session_id = str(state.get("session_id") or "default")
         configurable = config.get("configurable", {})
         user_id = str(configurable.get("user_id") or session_id or "default")
         host_context = dict(configurable.get("runtime_context") or {})
-        current_step = _current_step_number(state)
         current_step_id = _current_step_id(state)
         current_agent_name = str(state.get("current_agent_name") or "main")
 
         if not last_ai_message:
             return {"end_tag": False}
 
-        if (not hasattr(last_ai_message, "tool_calls") or not last_ai_message.tool_calls) and last_ai_message.content:
+        if not last_ai_message.tool_calls and last_ai_message.content:
             if allow_direct_reply:
-                content = last_ai_message.content
-                if isinstance(content, list):
-                    text = "".join(
-                        part.get("text", "") if isinstance(part, dict) else str(part)
-                        for part in content
-                    ).strip()
-                else:
-                    text = str(content or "").strip()
                 return {
                     "end_tag": True,
-                    "final_reply": text,
+                    "final_reply": text_of(last_ai_message),
                 }
             # Otherwise, force the agent to use tools explicitly (artifact-first mode).
             message = (
@@ -195,20 +179,17 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             )
             return {
                 "end_tag": False,
-                "tool_result_history": [
-                    _make_tool_history_entry(current_step, "tool_node_guard", {}, message, True)
-                ],
                 "messages": [HumanMessage(content="[Framework Reminder]\n" + message)],
             }
 
         tool_calls = list(last_ai_message.tool_calls or [])
-
-        new_history_entries: List[Dict[str, Any]] = []
         accumulated_state_patch: Dict[str, Any] = {}
+        # Turn index must match ai_node's step_counter so a step's think, tool
+        # chips, and result all land in one UI turn block.
+        turn_index = turn_index_of(current_step_id)
 
         async def _run_tool_call(
                 tool_call: Dict[str, Any],
-                step_number: int,
                 call_index: int,
         ) -> Dict[str, Any]:
             name = str(tool_call["name"])
@@ -228,24 +209,18 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             )
             args_json = json.dumps(tool_call["args"], ensure_ascii=False, indent=2)
             logging.info(
-                f"agent:{current_agent_name}, step_number:{step_number}, Executing tool {name} (session: {session_id}) with args:{args_json}")
+                f"agent:{current_agent_name}, step:{turn_index}, Executing tool {name} (session: {session_id}) with args:{args_json}")
             tool = tool_map.get(name)
             if not tool:
                 return {
-                    "step": step_number,
-                    "step_id": current_step_id,
                     "call_id": call_id,
                     "tool_name": name,
-                    "tool_args": raw_args,
                     "result": f"Tool not found: {name}",
                     "has_error": True,
                     "raw_result": None,
                 }
 
             invoke_args = dict(raw_args)
-            # Turn index must match ai_node / history_node (the step_id counter),
-            # so a step's think, tool chips, and result share one UI turn block.
-            turn_index = _turn_index_from_step_id(current_step_id)
             # Pass the graph config into the tool so builtins that need the
             # parent event_emitter / cancel_event (dispatch_subagents) receive it
             # by injection — never via a contextvar that async fan-out can drop.
@@ -256,7 +231,7 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                 "agent_name": current_agent_name,
                 "session_id": session_id,
                 "tool_name": name,
-                "tool_args": _filter_thought_args(raw_args),
+                "tool_args": visible_args(raw_args),
             })
             try:
                 result = await tool.ainvoke(invoke_args, config=config)
@@ -268,16 +243,13 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     "agent_name": current_agent_name,
                     "session_id": session_id,
                     "tool_name": name,
-                    "tool_args": _filter_thought_args(raw_args),
+                    "tool_args": visible_args(raw_args),
                     "result": result_str,
                     "has_error": tool_failed,
                 })
                 return {
-                    "step": step_number,
-                    "step_id": current_step_id,
                     "call_id": call_id,
                     "tool_name": name,
-                    "tool_args": raw_args,
                     "result": result_str,
                     "has_error": tool_failed,
                     "raw_result": result_str if isinstance(result, str) else result,
@@ -294,51 +266,52 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
                     "agent_name": current_agent_name,
                     "session_id": session_id,
                     "tool_name": name,
-                    "tool_args": _filter_thought_args(raw_args),
+                    "tool_args": visible_args(raw_args),
                     "result": err_msg,
                     "has_error": True,
                 })
                 return {
-                    "step": step_number,
-                    "step_id": current_step_id,
                     "call_id": call_id,
                     "tool_name": name,
-                    "tool_args": raw_args,
                     "result": err_msg,
                     "has_error": True,
                     "raw_result": None,
                 }
 
-        if tool_calls:
-            execution_results = []
-            for index, tool_call in enumerate(tool_calls):
-                result = await _run_tool_call(tool_call, current_step + index, index)
-                execution_results.append(result)
-
-            for item in execution_results:
-                entry = _make_tool_history_entry(
-                    int(item["step"]),
-                    str(item["tool_name"]),
-                    dict(item["tool_args"]),
-                    str(item["result"]),
-                    bool(item["has_error"]),
-                    str(item.get("call_id") or ""),
-                )
-                entry["step_id"] = str(item.get("step_id") or current_step_id)
-                new_history_entries.append(entry)
-
-                result = item["result"]
-                logging.info(f"agent:{current_agent_name}, tool_call_end, result:{result}")
-                if isinstance(item.get("raw_result"), dict):
-                    _merge_state_patch(accumulated_state_patch, dict(item["raw_result"]))
-            current_step += len(execution_results)
+        tool_messages: List[ToolMessage] = []
+        for index, tool_call in enumerate(tool_calls):
+            item = await _run_tool_call(tool_call, index)
+            logging.info(f"agent:{current_agent_name}, tool_call_end, result:{item['result']}")
+            tool_messages.append(ToolMessage(
+                content=str(item["result"]),
+                tool_call_id=str(item["call_id"]),
+                name=str(item["tool_name"]),
+                status="error" if item["has_error"] else "success",
+            ))
+            if isinstance(item.get("raw_result"), dict):
+                _merge_state_patch(accumulated_state_patch, dict(item["raw_result"]))
 
         updates: Dict[str, Any] = {
-            "tool_result_history": new_history_entries,
+            "messages": tool_messages,
+            # Same step_id as ai_node's plan-time write, so the reducer fills
+            # results into that entry instead of appending a second turn.
+            "timeline": [build_turn(
+                step_id=current_step_id,
+                ai_message=last_ai_message,
+                tool_messages=tool_messages,
+            )],
             "end_tag": False,
         }
         if accumulated_state_patch:
             _merge_state_patch(updates, accumulated_state_patch)
+        await _emit_step_done(
+            config,
+            step_id=current_step_id,
+            turn_index=turn_index,
+            agent_name=current_agent_name,
+            session_id=session_id,
+            turn=updates["timeline"][0],
+        )
         return updates
 
     return tool_node

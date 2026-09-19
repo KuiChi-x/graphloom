@@ -4,11 +4,11 @@ import os
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graphloom.model.state import AgentState
-from graphloom.prompt.context_renderer import _json_block, build_past_steps_message, build_user_request_str
+from graphloom.prompt.context_renderer import _json_block
 from graphloom.prompt.find_fault_system_prompt import COMMON_FIND_FAULT_SYSTEM_PROMPT
 from graphloom.util.session_store import session_store
 
@@ -129,6 +129,60 @@ def build_find_fault_context_str(state: AgentState) -> str | None:
     return "\n\n".join(section for section in sections if section)
 
 
+def _for_review(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """Replay the run's history into a *different* model's request.
+
+    Reasoning blocks are provider-signed and only valid on the request that
+    produced them, so sending them to the reviewer — often another model or
+    another provider entirely — risks a signature rejection. The reasoning text
+    is what the audit actually needs, so it is flattened into an ordinary text
+    block: content preserved, signature contract dropped.
+
+    tool_calls stay attached, and their ToolMessages follow in the list, so the
+    reviewer sees which calls produced which results.
+    """
+    converted: List[BaseMessage] = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            converted.append(message)
+            continue
+        parts: List[Dict[str, Any]] = []
+        for block in message.content_blocks:
+            kind = block.get("type")
+            if kind == "reasoning":
+                text = str(block.get("reasoning") or "").strip()
+                if text:
+                    parts.append({"type": "text", "text": f"[reasoning]\n{text}"})
+            elif kind == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    parts.append({"type": "text", "text": text})
+        converted.append(AIMessage(
+            id=message.id,
+            content=parts or "",
+            tool_calls=list(message.tool_calls or []),
+        ))
+    return converted
+
+
+def review_verdict(feedback: str) -> HumanMessage:
+    """Reviewer feedback re-enters the loop as a framework-authored user turn.
+
+    It cannot be a ToolMessage: there is no tool_call_id for it to answer, and
+    a ToolMessage that answers nothing is a malformed request next turn.
+
+    Public so host-defined reviewer nodes (custom_find_fault) can report a
+    rejection the same way the builtin does::
+
+        return {"messages": [review_verdict(msg)],
+                "end_tag": False, "current_delivery_manifest": []}
+    """
+    return HumanMessage(content=f"[Find-Fault Review]\n{feedback}")
+
+
+_verdict_message = review_verdict
+
+
 def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
     async def find_fault_node(state: AgentState) -> Dict[str, Any]:
         current_delivery_manifest = list(state.get("current_delivery_manifest", []) or [])
@@ -142,26 +196,25 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
         )
         messages: List[BaseMessage] = [SystemMessage(content=combined_system_prompt)]
 
-        messages.append(build_past_steps_message(list(state.get("past_steps", []) or [])))
+        # 1. The run itself, verbatim.
+        #
+        # The reviewer needs the whole conversation, not a summary of it and not
+        # the latest message: on a continued thread the newest request is often
+        # "继续", which says nothing about what the delivery had to satisfy. The
+        # requirements were stated earlier, refined across turns, and the agent's
+        # own reasoning recorded which readings it settled on — so the audit
+        # replays the native history and judges the artifacts against all of it.
+        messages.extend(_for_review(list(state.get("messages", []) or [])))
 
         # 2. Context
         prompt_context = build_find_fault_context_str(state)
         if not prompt_context:
             feedback = "Find-fault rejected the delivery because the artifact content could not be read."
-            step = len(state.get("past_steps", []) or []) + 1
             return {
                 "end_tag": False,
                 "current_delivery_manifest": [],
                 "approved_artifact_manifest": [],
-                "tool_result_history": [
-                    {
-                        "step": step,
-                        "tool_name": "find_fault",
-                        "tool_args": {},
-                        "result": feedback,
-                        "has_error": True,
-                    }
-                ],
+                "messages": [_verdict_message(feedback)],
             }
         messages.append(HumanMessage(content=prompt_context))
 
@@ -170,17 +223,12 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
         if observer_message_parts:
             messages.extend(observer_message_parts)
 
-        # 4. User Request / HumanMessage
-        user_request = build_user_request_str(state)
-        human_trigger = f"{user_request}\n\nPlease formally evaluate the delivered artifacts based on your rules."
-
-        messages.append(
-            HumanMessage(
-                content=[
-                    {"type": "text", "text": human_trigger},
-                ]
-            )
-        )
+        # 4. The audit instruction, last so it is what the reviewer acts on.
+        messages.append(HumanMessage(content=(
+            "Please formally evaluate the delivered artifacts based on your rules.\n"
+            "Judge them against everything the user asked for across this entire "
+            "conversation, not only the most recent message."
+        )))
 
         structured_llm = llm.with_structured_output(
             GenericFindFaultOutput,
@@ -212,7 +260,6 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
                 feedback_parts.append(f"  {i}. {rework}")
 
         feedback = "\n".join(feedback_parts) if feedback_parts else "Find-fault completed."
-        step = len(state.get("past_steps", []) or []) + 1
 
         # --- Update delivery_status in session store ---
         session_id = str(state.get("session_id") or "default")
@@ -242,15 +289,9 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
             "end_tag": False,
             "current_delivery_manifest": current_delivery_manifest if accepted else [],
             "approved_artifact_manifest": current_delivery_manifest if accepted else [],
-            "tool_result_history": [
-                {
-                    "step": step,
-                    "tool_name": "find_fault",
-                    "tool_args": {},
-                    "result": feedback,
-                    "has_error": not accepted,
-                }
-            ],
+            # Accepted deliveries end the run; only a rejection needs to be fed
+            # back for rework.
+            "messages": [] if accepted else [_verdict_message(feedback)],
         }
 
     return find_fault_node

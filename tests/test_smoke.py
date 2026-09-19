@@ -4,7 +4,7 @@ from typing import cast
 
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import NodeCancelledError
@@ -13,6 +13,7 @@ from graphloom import build_agent_graph
 from graphloom.nodes.ai import _astream_with_retry
 from graphloom.nodes.find_fault import GenericFindFaultOutput, create_find_fault_node
 from graphloom.nodes.tool import create_tool_node
+from graphloom.util.message_utils import text_of
 
 
 class _FakeLLM:
@@ -47,7 +48,7 @@ async def test_build_and_run_minimal():
         allow_direct_reply=True,
     )
     result = await graph.ainvoke(
-        {"input_query": "hi"}
+        {"messages": [HumanMessage(content="hi")]}
     )
     assert result["agent_status"] == "done"
     assert result["end_tag"] is True
@@ -65,10 +66,10 @@ async def test_follow_up_request_uses_checkpoint_conversation_history():
         checkpointer=checkpointer,
     )
     await graph.ainvoke(
-        {"input_query": "Only use GET requests"},
+        {"messages": [HumanMessage(content="Only use GET requests")]},
     )
     await graph.ainvoke(
-        {"input_query": "Continue with authentication"},
+        {"messages": [HumanMessage(content="Continue with authentication")]},
     )
 
     second_prompt = "\n".join(str(message.content) for message in llm.calls[-1])
@@ -76,14 +77,14 @@ async def test_follow_up_request_uses_checkpoint_conversation_history():
     assert "Continue with authentication" in second_prompt
 
     snapshot = await graph.aget_state({"configurable": {"thread_id": "default", "checkpoint_ns": ""}})
-    conversation = list(snapshot.values["conversation"])
+    conversation = list(snapshot.values["messages"])
     assert [message.type for message in conversation] == [
         "human",
         "ai",
         "human",
         "ai",
     ]
-    assert [message.content for message in conversation] == [
+    assert [text_of(message) for message in conversation] == [
         "Only use GET requests",
         "done",
         "Continue with authentication",
@@ -133,7 +134,10 @@ async def test_streams_standard_reasoning_content_blocks():
         )
 
         assert reasoning == expected
-        assert events == [("ai_delta", {"content": "", "reasoning": expected})]
+        assert len(events) == 1
+        event_type, payload = events[0]
+        assert event_type == "ai_delta"
+        assert (payload["content"], payload["reasoning"]) == ("", expected)
 
 
 async def test_same_step_same_tool_calls_keep_distinct_ids():
@@ -152,14 +156,16 @@ async def test_same_step_same_tool_calls_keep_distinct_ids():
     state = {
         "current_agent_name": "browser",
         "session_id": "s1",
-        "past_steps": [{
+        # ai_node stamped this turn as step 1; tool_node must reuse that id.
+        "step_counter": 1,
+        "timeline": [{
             "step_id": "browser:s1:step:1",
             "status": "pending_tool",
         }],
-        "latest_ai_message": AIMessage(content="", tool_calls=[
+        "messages": [AIMessage(content="", id="ai-1", tool_calls=[
             {"name": "echo", "args": {"value": "first"}, "id": "call-first", "type": "tool_call"},
             {"name": "echo", "args": {"value": "second"}, "id": "call-second", "type": "tool_call"},
-        ]),
+        ])],
     }
 
     result = await node(state, {"configurable": {"event_emitter": Emitter()}})
@@ -168,7 +174,11 @@ async def test_same_step_same_tool_calls_keep_distinct_ids():
     ends = [payload for event, payload in events if event == "tool_end"]
     assert [payload["call_id"] for payload in starts] == ["call-first", "call-second"]
     assert [payload["call_id"] for payload in ends] == ["call-first", "call-second"]
-    assert [item["call_id"] for item in result["tool_result_history"]] == ["call-first", "call-second"]
+    assert [m.tool_call_id for m in result["messages"]] == ["call-first", "call-second"]
+    assert [m.content for m in result["messages"]] == ["first", "second"]
+    assert all(isinstance(m, ToolMessage) for m in result["messages"])
+    # One timeline entry, keyed to the planning write so it updates in place.
+    assert [entry["step_id"] for entry in result["timeline"]] == ["browser:s1:step:1"]
 
 
 async def test_find_fault_uses_function_calling_structured_output(tmp_path):
@@ -186,8 +196,8 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
             roles = [message.type for message in messages]
             assert roles[0] == "system"
             assert "system" not in roles[1:]
-            assert messages[1].content[-1] == {"type": "text", "text": "</agent_history>"}
-            assert all(message.content != "</agent_history>" for message in messages)
+            # The reviewer replays the native run, not a digest of it.
+            assert messages[1].content == "Deliver hello."
             return GenericFindFaultOutput(
                 is_acceptable=True,
                 decisive_assessment="accepted",
@@ -198,19 +208,15 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
     result = await node({
         "current_delivery_manifest": manifest,
         "input_artifact_manifest": [],
-        "past_steps": [{
-            "last_step_review": "Created the requested artifact.",
-            "working_notes": "",
-            "next_action": "Submit for review.",
-            "action_results": "Wrote result.txt.",
-        }],
+
         "observer_message_parts": [],
-        "input_query": "Deliver hello.",
+        "messages": [HumanMessage(content="Deliver hello.")],
         "session_id": "structured-output-test",
     })
 
     assert result["current_delivery_manifest"] == manifest
-    assert result["tool_result_history"][0]["has_error"] is False
+    # Accepted: nothing is fed back into the loop.
+    assert result["messages"] == []
 
 
 
@@ -235,16 +241,16 @@ async def test_cancelled_turn_keeps_user_message_for_next_request():
     config = {"configurable": {"thread_id": "cancelled-turn", "checkpoint_ns": ""}}
 
     try:
-        await graph.ainvoke({"input_query": "Remember this before cancellation"}, config=config)
+        await graph.ainvoke({"messages": [HumanMessage(content="Remember this before cancellation")]}, config=config)
     except NodeCancelledError:
         pass
 
     snapshot = await graph.aget_state(config)
-    assert [message.content for message in snapshot.values["conversation"]] == [
+    assert [text_of(m) for m in snapshot.values["messages"]] == [
         "Remember this before cancellation"
     ]
 
-    await graph.ainvoke({"input_query": "Continue now"}, config=config)
+    await graph.ainvoke({"messages": [HumanMessage(content="Continue now")]}, config=config)
     second_prompt = "\n".join(str(message.content) for message in llm.calls[-1])
     assert second_prompt.count("Remember this before cancellation") == 1
     assert second_prompt.count("Continue now") == 1
