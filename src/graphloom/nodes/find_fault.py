@@ -3,14 +3,19 @@ import logging
 import os
 from typing import Any, Dict, List
 
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from graphloom.model.state import AgentState
 from graphloom.prompt.context_renderer import _json_block
 from graphloom.prompt.find_fault_system_prompt import COMMON_FIND_FAULT_SYSTEM_PROMPT
 from graphloom.util.session_store import session_store
+from graphloom.util.structured_output import structured_output_llm
+
+logger = logging.getLogger(__name__)
 
 
 class GenericFindFaultOutput(BaseModel):
@@ -183,6 +188,30 @@ def review_verdict(feedback: str) -> HumanMessage:
 _verdict_message = review_verdict
 
 
+# 结构化输出失败 = 模型这一轮没按 schema 调用工具。这是随机的，同一份 prompt 再来
+# 一次常常就调用了，所以值得重试；网络/限流那层由 SDK 自己重试，这里不重复管。
+# 重试用尽后照旧往上抛，不把"没审出来"降级成"通过"。
+_AUDIT_ATTEMPTS = 2
+
+
+@retry(
+    stop=stop_after_attempt(_AUDIT_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type((OutputParserException, ValidationError)),
+    before_sleep=lambda retry_state: logger.warning(
+        "[find_fault] structured output failed (attempt %d/%d), retrying: %r",
+        retry_state.attempt_number,
+        _AUDIT_ATTEMPTS,
+        retry_state.outcome.exception(),
+    ),
+    reraise=True,
+)
+async def _audit_with_retry(
+    structured_llm: Any, messages: List[BaseMessage]
+) -> GenericFindFaultOutput:
+    return await structured_llm.ainvoke(messages)
+
+
 def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
     async def find_fault_node(state: AgentState) -> Dict[str, Any]:
         current_delivery_manifest = list(state.get("current_delivery_manifest", []) or [])
@@ -230,12 +259,9 @@ def create_find_fault_node(system_prompt: str, llm: BaseChatModel):
             "conversation, not only the most recent message."
         )))
 
-        structured_llm = llm.with_structured_output(
-            GenericFindFaultOutput,
-            method="function_calling",
-        )
+        structured_llm = structured_output_llm(llm, GenericFindFaultOutput)
 
-        result = await structured_llm.ainvoke(messages)
+        result = await _audit_with_retry(structured_llm, messages)
         validation = result.model_dump()
         logging.info(f"Find-fault validation result: {json.dumps(validation, indent=2, ensure_ascii=False)}")
 

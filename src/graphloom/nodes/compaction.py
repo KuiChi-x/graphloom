@@ -39,6 +39,7 @@ from graphloom.model.timeline import visible_args
 from graphloom.prompt.message_builder import build_llm_messages
 from graphloom.prompt.stack import PromptStack
 from graphloom.util.message_utils import text_of, turns
+from graphloom.util.structured_output import structured_output_llm
 from graphloom.util.token_counter import count_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -162,10 +163,9 @@ async def _summarize(
     budgets: Dict[str, int],
     llm: BaseChatModel,
 ) -> Dict[str, Any]:
-    # bind BEFORE with_structured_output so the provider sees max_tokens.
-    structured_llm = (
-        llm.bind(max_tokens=_max_output_tokens())
-        .with_structured_output(StandardThoughtInput, method="function_calling")
+    # max_tokens is bound BEFORE the structured wrapper so the provider sees it.
+    structured_llm = structured_output_llm(
+        llm, StandardThoughtInput, max_tokens=_max_output_tokens()
     )
     system = COMPACTION_SYSTEM_PROMPT.format(
         eval_budget=budgets["last_step_review"],

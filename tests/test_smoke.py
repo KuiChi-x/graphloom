@@ -2,9 +2,12 @@
 import asyncio
 from typing import cast
 
+import pytest
 from dotenv import load_dotenv
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import NodeCancelledError
@@ -187,21 +190,30 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
     manifest = [{"path": str(artifact), "type": "text"}]
 
     class StructuredLLM:
-        def with_structured_output(self, schema, **kwargs):
-            assert schema is GenericFindFaultOutput
-            assert kwargs == {"method": "function_calling"}
-            return self
+        def bind_tools(self, tools, **kwargs):
+            assert tools == [GenericFindFaultOutput]
+            # 不强制 tool_choice：思考模式的上游拒绝这个组合。
+            assert kwargs == {}
+            return RunnableLambda(self._verdict)
 
-        async def ainvoke(self, messages):
+        def _verdict(self, messages):
             roles = [message.type for message in messages]
             assert roles[0] == "system"
             assert "system" not in roles[1:]
             # The reviewer replays the native run, not a digest of it.
             assert messages[1].content == "Deliver hello."
-            return GenericFindFaultOutput(
-                is_acceptable=True,
-                decisive_assessment="accepted",
-                confidence=1.0,
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": GenericFindFaultOutput.__name__,
+                    "args": {
+                        "is_acceptable": True,
+                        "decisive_assessment": "accepted",
+                        "confidence": 1.0,
+                    },
+                    "id": "verdict-1",
+                    "type": "tool_call",
+                }],
             )
 
     node = create_find_fault_node("Review the artifact.", StructuredLLM())
@@ -217,6 +229,71 @@ async def test_find_fault_uses_function_calling_structured_output(tmp_path):
     assert result["current_delivery_manifest"] == manifest
     # Accepted: nothing is fed back into the loop.
     assert result["messages"] == []
+
+
+def _audit_state(tmp_path, session_id):
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("hello", encoding="utf-8")
+    return {
+        "current_delivery_manifest": [{"path": str(artifact), "type": "text"}],
+        "input_artifact_manifest": [],
+        "observer_message_parts": [],
+        "messages": [HumanMessage(content="Deliver hello.")],
+        "session_id": session_id,
+    }
+
+
+async def test_find_fault_retries_when_the_model_skips_the_tool(tmp_path):
+    """模型没调用工具是随机的：重试一次通常就调用上了，不该直接崩。"""
+
+    class SkipsOnceLLM:
+        def __init__(self):
+            self.attempts = 0
+
+        def bind_tools(self, tools, **kwargs):
+            return RunnableLambda(self._verdict)
+
+        def _verdict(self, messages):
+            self.attempts += 1
+            if self.attempts == 1:
+                # 第一轮只给散文，没有 tool_calls —— 旧代码在这里直接崩。
+                return AIMessage(content="Everything looks fine to me.")
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": GenericFindFaultOutput.__name__,
+                    "args": {"is_acceptable": True, "decisive_assessment": "accepted"},
+                    "id": "verdict-2",
+                    "type": "tool_call",
+                }],
+            )
+
+    llm = SkipsOnceLLM()
+    node = create_find_fault_node("Review the artifact.", llm)
+    result = await node(_audit_state(tmp_path, "find-fault-retry"))
+
+    assert llm.attempts == 2
+    assert result["messages"] == []
+
+
+async def test_find_fault_gives_up_after_the_retry(tmp_path):
+    class NeverCallsLLM:
+        def __init__(self):
+            self.attempts = 0
+
+        def bind_tools(self, tools, **kwargs):
+            return RunnableLambda(self._prose)
+
+        def _prose(self, messages):
+            self.attempts += 1
+            return AIMessage(content="I would rather describe it in prose.")
+
+    llm = NeverCallsLLM()
+    node = create_find_fault_node("Review the artifact.", llm)
+    with pytest.raises(OutputParserException):
+        await node(_audit_state(tmp_path, "find-fault-retry-exhausted"))
+
+    assert llm.attempts == 2
 
 
 
