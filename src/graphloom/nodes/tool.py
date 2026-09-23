@@ -45,6 +45,31 @@ def _resolve_error(text: str) -> tuple[str, bool]:
     return rest, marker[len(_OUTCOME_PREFIX):].strip() == "error"
 
 
+def _count_repeats(messages: List[Any]) -> int:
+    """重复检测"""
+    results = {str(m.tool_call_id): str(m.content) for m in messages if isinstance(m, ToolMessage)}
+    signatures = []
+    for message in messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            # 排序:同一批并行调用换个顺序发,仍然是同一轮。
+            signatures.append("\n".join(sorted(
+                json.dumps([
+                    str(call.get("name") or ""),
+                    visible_args(dict(call.get("args") or {})),
+                    results.get(str(call.get("id") or ""), ""),
+                ], ensure_ascii=False, sort_keys=True, default=str)
+                for call in message.tool_calls
+            )))
+    if not signatures:
+        return 0
+    count = 0
+    for signature in reversed(signatures):
+        if signature != signatures[-1]:
+            break
+        count += 1
+    return count
+
+
 def _current_step_id(state: AgentState) -> str:
     """This turn's step id. `step_counter` is monotonic and survives
     compaction, so the id stays stable for the whole turn — ai_node already
@@ -290,6 +315,26 @@ def create_tool_node(tools: List[Any], allow_direct_reply: bool = False):
             ))
             if isinstance(item.get("raw_result"), dict):
                 _merge_state_patch(accumulated_state_patch, dict(item["raw_result"]))
+
+        # 空转检测
+        repeats = _count_repeats(list(state.get("messages") or []) + tool_messages)
+        names = ", ".join(sorted({str(m.name or "") for m in tool_messages if m.name}))
+        if repeats >= 6:
+            raise RuntimeError(
+                f"空转熔断:连续 {repeats} 轮重复同一个调用({names or '未知工具'}),"
+                f"参数和返回值都没变化,提醒后仍在重复,无法取得进展。"
+            )
+        if repeats >= 3:
+            tool_messages[-1].content = (
+                f"{tool_messages[-1].content}\n\n[Framework Reminder]\n"
+                f"You have issued this same call {repeats} times in a row "
+                f"({names}) — identical arguments, identical results. Repeating it "
+                "cannot produce a different outcome. Change something concrete: a "
+                "different tool, different arguments, or a different approach. If "
+                "you genuinely cannot make progress, stop and finish with the "
+                "partial result you have plus an honest account of what blocked "
+                f"you. This run is aborted after {6 - repeats} more repeat(s)."
+            )
 
         updates: Dict[str, Any] = {
             "messages": tool_messages,
